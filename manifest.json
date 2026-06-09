@@ -1,0 +1,25 @@
+{
+  "name": "Backdrop Studio",
+  "short_name": "Backdrop",
+  "description": "ระบบบัญชีธุรกิจ",
+  "start_url": "./backdrop-studio.html",
+  "display": "standalone",
+  "background_color": "#0B0B12",
+  "theme_color": "#D4AF70",
+  "orientation": "portrait-primary",
+  "lang": "th",
+  "icons": [
+    {
+      "src": "icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
