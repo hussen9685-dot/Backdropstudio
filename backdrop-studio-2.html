@@ -1142,7 +1142,8 @@ function DividendForm({state,user,save,onClose,pools,editing}){
 }
 
 /* ═══ TRANSFER (โอนย้ายเงินระหว่างกองทุน) ═══ */
-const POOL_LABEL={workingCapital:{l:'เงินหมุนเวียน',i:'🏠',c:T.blue},dividend:{l:'เงินปันผล',i:'💸',c:T.green},bonus:{l:'เงินโบนัส',i:'🎁',c:T.gold}};
+const REAL_POOLS=['workingCapital','dividend','bonus'];
+const POOL_LABEL={workingCapital:{l:'เงินหมุนเวียน',i:'🏠',c:T.blue},dividend:{l:'เงินปันผล',i:'💸',c:T.green},bonus:{l:'เงินโบนัส',i:'🎁',c:T.gold},external:{l:'เงินสดเก่า/นอกระบบ',i:'🗂️',c:T.muted}};
 function TransferTab({state,user,save,pools}){
   const [showForm,setShowForm]=useState(false);
   const list=state.transfers||[];
@@ -1155,11 +1156,11 @@ function TransferTab({state,user,save,pools}){
   return (
     <div>
       <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:14,flexWrap:'wrap',gap:8}}>
-        <p style={{fontSize:13,color:T.muted}}>ย้ายเงินระหว่าง 3 กองทุน เช่น เติมเงินหมุนเวียนจากกองปันผล</p>
+        <p style={{fontSize:13,color:T.muted}}>ย้ายเงินระหว่าง 3 กองทุน หรือเติม/ตัดยอดจากเงินสดนอกระบบ (เช่น ยอดยกมาก่อนใช้แอป)</p>
         <Btn onClick={()=>setShowForm(true)}>+ โอนเงิน</Btn>
       </div>
       <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(140px,1fr))',gap:12,marginBottom:18}}>
-        {Object.keys(POOL_LABEL).map(k=>(
+        {REAL_POOLS.map(k=>(
           <StatCard key={k} icon={POOL_LABEL[k].i} label={POOL_LABEL[k].l} value={baht(balances[k])} color={POOL_LABEL[k].c}/>
         ))}
       </div>
@@ -1193,10 +1194,10 @@ function TransferTab({state,user,save,pools}){
 }
 
 function TransferForm({state,user,save,balances,onClose}){
-  const [f,setF]=useState({from:'workingCapital',to:'dividend',amount:'',note:'',date:new Date().toISOString().split('T')[0]});
+  const [f,setF]=useState({from:'external',to:'dividend',amount:'',note:'',date:new Date().toISOString().split('T')[0]});
   const set=k=>e=>setF(p=>({...p,[k]:e.target.value}));
   const amtNum=Number(f.amount)||0;
-  const overBalance=amtNum>balances[f.from];
+  const overBalance=f.from!=='external'&&amtNum>balances[f.from];
   const submit=async()=>{
     if(f.from===f.to){alert('กองต้นทางและปลายทางต้องไม่ใช่กองเดียวกัน');return;}
     if(!amtNum||amtNum<=0){alert('กรอกจำนวนเงิน');return;}
@@ -1204,14 +1205,17 @@ function TransferForm({state,user,save,balances,onClose}){
     const hist=[{id:uid(),type:'transfer',desc:`โอนเงิน ${baht(amtNum)} จาก${POOL_LABEL[f.from].l} → ${POOL_LABEL[f.to].l}`,userId:user.id,amount:amtNum,createdAt:ts()},...state.hist].slice(0,500);
     await save({transfers:[nt,...(state.transfers||[])],hist}); onClose();
   };
+  const fromOptions=[{v:'external',l:`🗂️ เงินสดเก่า/นอกระบบ (ยอดยกมา)`},...REAL_POOLS.map(k=>({v:k,l:`${POOL_LABEL[k].i} ${POOL_LABEL[k].l} (คงเหลือ ${baht(balances[k])})`}))];
+  const toOptions=[...REAL_POOLS.map(k=>({v:k,l:`${POOL_LABEL[k].i} ${POOL_LABEL[k].l} (คงเหลือ ${baht(balances[k])})`})),{v:'external',l:`🗂️ เงินสดเก่า/นอกระบบ (ตัดออก)`}];
   return (
-    <Modal title="โอนย้ายเงินระหว่างกองทุน" onClose={onClose}>
+    <Modal title="โอนย้ายเงิน / ปรับยอดกองทุน" onClose={onClose}>
       <div style={{display:'flex',flexDirection:'column',gap:14}}>
-        <Inp label="จากกอง" type="select" value={f.from} onChange={set('from')} options={Object.keys(POOL_LABEL).map(k=>({v:k,l:`${POOL_LABEL[k].i} ${POOL_LABEL[k].l} (คงเหลือ ${baht(balances[k])})`}))}/>
-        <Inp label="ไปกอง" type="select" value={f.to} onChange={set('to')} options={Object.keys(POOL_LABEL).map(k=>({v:k,l:`${POOL_LABEL[k].i} ${POOL_LABEL[k].l} (คงเหลือ ${baht(balances[k])})`}))}/>
+        <Inp label="จากกอง" type="select" value={f.from} onChange={set('from')} options={fromOptions}/>
+        <Inp label="ไปกอง" type="select" value={f.to} onChange={set('to')} options={toOptions}/>
         <Inp label="จำนวนเงิน (บาท) *" type="number" value={f.amount} onChange={set('amount')} min="0" step="50"/>
+        {f.from==='external'&&<p style={{fontSize:11,color:T.muted}}>💡 ใช้ตัวเลือกนี้สำหรับเงินที่มีอยู่จริงนอกระบบ เช่น ยอดปันผลเก่าก่อนใช้แอป ระบบจะเติมยอดเข้ากองโดยไม่หักจากกองอื่น</p>}
         {overBalance&&<p style={{fontSize:11,color:T.red}}>⚠️ ยอดโอนเกินยอดคงเหลือในกองต้นทาง</p>}
-        <Inp label="หมายเหตุ" value={f.note} onChange={set('note')} placeholder="เช่น เติมเงินหมุนเวียนเพราะค่าเช่าขาด"/>
+        <Inp label="หมายเหตุ" value={f.note} onChange={set('note')} placeholder="เช่น ยอดปันผลยกมาจากเดือนก่อนใช้แอป"/>
         <Inp label="วันที่" type="date" value={f.date} onChange={set('date')}/>
         <div style={{display:'flex',gap:10,justifyContent:'flex-end'}}>
           <Btn ghost onClick={onClose}>ยกเลิก</Btn><Btn onClick={submit}>โอนเงิน</Btn>
