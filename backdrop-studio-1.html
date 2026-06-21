@@ -62,10 +62,10 @@ const DB = {
 
 /* ═══ SEEDS ═══ */
 const SEED_USERS = [
-  {id:'kada',  name:'ก๊ะดา', pin:'1234', role:'admin',  share:25, color:'#D4AF70', photo:null},
-  {id:'bila',  name:'บีลา',  pin:'2234', role:'member', share:25, color:'#E8968A', photo:null},
-  {id:'wannee',name:'วันณี', pin:'3234', role:'member', share:25, color:'#72C095', photo:null},
-  {id:'nana',  name:'นานา',  pin:'4234', role:'member', share:25, color:'#72A0C8', photo:null},
+  {id:'kada',  name:'ก๊ะดา', pin:'1234', role:'admin',  share:25, color:'#D4AF70', photo:null, expenseManager:false},
+  {id:'bila',  name:'บีลา',  pin:'2234', role:'member', share:25, color:'#E8968A', photo:null, expenseManager:true},
+  {id:'wannee',name:'วันณี', pin:'3234', role:'member', share:25, color:'#72C095', photo:null, expenseManager:false},
+  {id:'nana',  name:'นานา',  pin:'4234', role:'member', share:25, color:'#72A0C8', photo:null, expenseManager:false},
 ];
 const SEED_SETTINGS = { appName:'Backdrop Studio', appIcon:'💐', subtitle:'ระบบบัญชีธุรกิจ' };
 const PALETTE = ['#D4AF70','#E8968A','#72C095','#72A0C8','#C89FD4','#F4A261','#4FC3F7','#A8D48A','#E8C860','#FF8A65'];
@@ -76,6 +76,33 @@ const ts    = () => new Date().toISOString();
 const baht  = n  => '฿'+new Intl.NumberFormat('th-TH').format(Math.round(n||0));
 const dtTH  = iso => iso?new Date(iso).toLocaleDateString('th-TH',{day:'2-digit',month:'short',year:'2-digit'}):'-';
 const dtFull= iso => iso?new Date(iso).toLocaleString('th-TH',{day:'numeric',month:'short',year:'2-digit',hour:'2-digit',minute:'2-digit'}):'-';
+
+/* ═══ POOL CALCULATOR — splits job income 60% (job expense fund) / 40% (net profit: 20% working capital + 15% dividend + 5% bonus) ═══ */
+function computePools(state){
+  const jobs=state.jobs||[], divs=state.divs||[], companyExpenses=state.companyExpenses||[], transfers=state.transfers||[];
+  let totalReceived=0;
+  const jobBudgets={};
+  jobs.forEach(j=>{
+    const dep=j.income?.deposit?.received?Number(j.income.deposit.amount)||0:0;
+    const rem=j.income?.remaining?.received?Number(j.income.remaining.amount)||0:0;
+    const received=dep+rem;
+    totalReceived+=received;
+    const budget60=received*0.6;
+    const spent=(j.expenses||[]).reduce((s,e)=>s+Number(e.amount||0),0);
+    jobBudgets[j.id]={received,budget60,spent,remaining:budget60-spent};
+  });
+  const netTransfer=pool=>transfers.reduce((s,t)=>s+(t.to===pool?Number(t.amount||0):0)-(t.from===pool?Number(t.amount||0):0),0);
+  const workingCapitalPoolTotal=totalReceived*0.20;
+  const workingCapitalSpent=companyExpenses.reduce((s,e)=>s+Number(e.amount||0),0);
+  const workingCapitalBalance=workingCapitalPoolTotal-workingCapitalSpent+netTransfer('workingCapital');
+  const dividendPoolTotal=totalReceived*0.15;
+  const dividendPaidTotal=divs.reduce((s,d)=>s+Number(d.totalAmount||0),0);
+  const dividendPoolBalance=dividendPoolTotal-dividendPaidTotal+netTransfer('dividend');
+  const bonusPoolTotal=totalReceived*0.05;
+  const bonusPaidTotal=divs.reduce((s,d)=>s+((d.bonus||d.wages||[]).reduce((a,x)=>a+Number(x.amount||0),0)),0);
+  const bonusPoolBalance=bonusPoolTotal-bonusPaidTotal+netTransfer('bonus');
+  return {totalReceived,jobBudgets,workingCapitalPoolTotal,workingCapitalSpent,workingCapitalBalance,dividendPoolTotal,dividendPaidTotal,dividendPoolBalance,bonusPoolTotal,bonusPaidTotal,bonusPoolBalance};
+}
 
 /* ═══ HOOK ═══ */
 function useMobile(){ 
@@ -252,7 +279,7 @@ const NAV=[
   {id:'dashboard',icon:'📊',label:'ภาพรวม'},
   {id:'schedule', icon:'📅',label:'ตารางงาน'},
   {id:'jobs',     icon:'💼',label:'งาน'},
-  {id:'divs',     icon:'💸',label:'ปันผล'},
+  {id:'funds',    icon:'💰',label:'กองทุน'},
   {id:'hist',     icon:'📋',label:'ประวัติ'},
   {id:'notifs',   icon:'🔔',label:'แจ้งเตือน'},
   {id:'settings', icon:'⚙️',label:'ตั้งค่า'},
@@ -344,16 +371,12 @@ function BottomNav({page,setPage,user,onLogout,unread}){
 
 /* ═══ DASHBOARD ═══ */
 function Dashboard({state,user,setPage,setJobId}){
-  const {users,jobs,divs}=state;
+  const {users,jobs}=state;
   const mob=useMobile();
-  const totalInc=jobs.reduce((s,j)=>s+(j.income?.deposit?.received?Number(j.income.deposit.amount)||0:0)+(j.income?.remaining?.received?Number(j.income.remaining.amount)||0:0),0);
-  const totalExp=jobs.reduce((s,j)=>s+(j.expenses||[]).reduce((a,e)=>a+Number(e.amount||0),0),0);
-  const totalWages=jobs.reduce((s,j)=>s+(j.expenses||[]).filter(e=>e.category==='labor').reduce((a,e)=>a+Number(e.amount||0),0),0);
-  const profit=totalInc-totalExp;
-  const totalDivPaid=divs.reduce((s,d)=>s+(d.shares||[]).reduce((a,x)=>a+Number(x.amount||0),0),0);
+  const pools=computePools(state);
   const pending=jobs.filter(j=>j.status!=='done');
   const unpaidJobs=jobs.filter(j=>j.income&&((!j.income.deposit?.received&&j.income.deposit?.amount>0)||(!j.income.remaining?.received&&j.income.remaining?.amount>0)));
-  const unreimbursed=jobs.reduce((s,j)=>s+(j.expenses||[]).filter(e=>!e.reimbursed).reduce((a,e)=>a+Number(e.amount||0),0),0);
+  const overBudgetJobs=jobs.filter(j=>(pools.jobBudgets[j.id]?.remaining||0)<0);
   return (
     <div>
       <div style={{marginBottom:24}}>
@@ -361,26 +384,26 @@ function Dashboard({state,user,setPage,setJobId}){
         <p style={{color:T.muted,fontSize:13}}>สรุปสถานะทางการเงินทั้งหมด</p>
       </div>
       <div style={{display:'grid',gridTemplateColumns:`repeat(auto-fill,minmax(${mob?'145px':'200px'},1fr))`,gap:14,marginBottom:20}}>
-        <StatCard icon="💰" label="รายได้รวม" value={baht(totalInc)} sub={`${jobs.filter(j=>j.income?.deposit?.received||j.income?.remaining?.received).length} งานรับเงินแล้ว`}/>
-        <StatCard icon="🧾" label="ค่าใช้จ่ายรวม" value={baht(totalExp)} sub={`ค่าจ้าง ${baht(totalWages)}`} color={T.amber}/>
-        <StatCard icon="📈" label="กำไรสุทธิ" value={baht(profit)} color={profit>=0?T.green:T.red}/>
-        <StatCard icon="🏷️" label="ยังไม่ได้ปันผล" value={baht(profit-totalDivPaid)} sub="กำไรคงเหลือ" color={T.blue}/>
+        <StatCard icon="💰" label="รับเงินรวม" value={baht(pools.totalReceived)} sub={`${jobs.filter(j=>j.income?.deposit?.received||j.income?.remaining?.received).length} งานรับเงินแล้ว`}/>
+        <StatCard icon="🏠" label="เงินหมุนเวียนคงเหลือ" value={baht(pools.workingCapitalBalance)} sub="กองกลาง 20%" color={T.blue}/>
+        <StatCard icon="💸" label="เงินปันผลคงเหลือ" value={baht(pools.dividendPoolBalance)} sub="กองกลาง 15%" color={T.green}/>
+        <StatCard icon="🎁" label="เงินโบนัสคงเหลือ" value={baht(pools.bonusPoolBalance)} sub="กองกลาง 5%" color={T.gold}/>
       </div>
       <Card>
-        <h3 style={{fontSize:15,fontWeight:700,color:T.text,marginBottom:14}}>📊 กำไรแต่ละคน (ตามสัดส่วนหุ้น)</h3>
+        <h3 style={{fontSize:15,fontWeight:700,color:T.text,marginBottom:14}}>📊 ส่วนแบ่งปันผลแต่ละคน (จากกองเงินปันผล 15%)</h3>
         <div style={{display:'grid',gridTemplateColumns:`repeat(auto-fill,minmax(${mob?'145px':'180px'},1fr))`,gap:12}}>
           {users.map(u=>{
-            const myDiv=divs.reduce((s,d)=>s+((d.shares||[]).find(x=>x.uid===u.id)?.amount||0),0);
-            const myProfit=profit*u.share/100;
-            const myWages=divs.reduce((s,d)=>s+((d.wages||[]).find(x=>x.uid===u.id)?.amount||0),0);
+            const myDiv=state.divs.reduce((s,d)=>s+((d.shares||[]).find(x=>x.uid===u.id)?.amount||0),0);
+            const myEntitlement=pools.dividendPoolTotal*u.share/100;
+            const myBonus=state.divs.reduce((s,d)=>s+((d.bonus||d.wages||[]).find(x=>x.uid===u.id)?.amount||0),0);
             return (
               <div key={u.id} style={{background:T.s2,border:`1px solid ${T.bdr}`,borderRadius:10,padding:'14px 16px'}}>
                 <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:8}}>
                   <Avatar user={u} size={28}/>
                   <div><div style={{fontSize:13,fontWeight:600}}>{u.name}</div><div style={{fontSize:10,color:T.muted}}>{u.share}% หุ้น</div></div>
                 </div>
-                <div style={{fontSize:15,fontWeight:700,color:T.green}}>{baht(myProfit)}</div>
-                <div style={{fontSize:11,color:T.muted,marginTop:2}}>ปันผลแล้ว {baht(myDiv)} · ค่าจ้าง {baht(myWages)}</div>
+                <div style={{fontSize:15,fontWeight:700,color:T.green}}>{baht(myEntitlement)}</div>
+                <div style={{fontSize:11,color:T.muted,marginTop:2}}>ได้รับแล้ว {baht(myDiv)} · โบนัส {baht(myBonus)}</div>
               </div>
             );
           })}
@@ -399,7 +422,7 @@ function Dashboard({state,user,setPage,setJobId}){
         </Card>
         <Card>
           <h3 style={{fontSize:14,fontWeight:700,color:T.text,marginBottom:12}}>⚠️ รายการที่ต้องดำเนินการ</h3>
-          {unpaidJobs.length===0&&unreimbursed===0?<Empty msg="ทุกอย่างเรียบร้อย ✅"/>:(
+          {unpaidJobs.length===0&&overBudgetJobs.length===0?<Empty msg="ทุกอย่างเรียบร้อย ✅"/>:(
             <>
               {unpaidJobs.slice(0,3).map(j=>(
                 <div key={j.id} style={{display:'flex',alignItems:'center',gap:8,padding:'7px 0',borderBottom:`1px solid ${T.bdr}`}}>
@@ -408,12 +431,13 @@ function Dashboard({state,user,setPage,setJobId}){
                   <Badge c={T.amber}>ค้างรับ</Badge>
                 </div>
               ))}
-              {unreimbursed>0&&(
-                <div style={{display:'flex',alignItems:'center',gap:8,padding:'7px 0'}}>
-                  <span>💼</span>
-                  <div style={{flex:1,fontSize:12}}>ยอดรอเบิกคืน <span style={{fontWeight:600,color:T.amber}}>{baht(unreimbursed)}</span></div>
+              {overBudgetJobs.slice(0,3).map(j=>(
+                <div key={j.id} style={{display:'flex',alignItems:'center',gap:8,padding:'7px 0',borderBottom:`1px solid ${T.bdr}`}}>
+                  <span>🧾</span>
+                  <div style={{flex:1,fontSize:12}}><span style={{fontWeight:600}}>{j.clientName}</span><span style={{color:T.muted}}> ใช้จ่ายเกินงบ 60%</span></div>
+                  <Badge c={T.red}>เกินงบ</Badge>
                 </div>
-              )}
+              ))}
             </>
           )}
         </Card>
@@ -490,6 +514,7 @@ function Schedule({state,setPage,setJobId}){
             jobs.map(j=>{
               const inc=(j.income?.deposit?.received?Number(j.income.deposit.amount)||0:0)+(j.income?.remaining?.received?Number(j.income.remaining.amount)||0:0);
               const exp=(j.expenses||[]).reduce((s,e)=>s+Number(e.amount||0),0);
+              const remaining60=inc*0.6-exp;
               return (
                 <Card key={j.id} onClick={()=>{setJobId(j.id);setPage('jobs');}}>
                   <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',flexWrap:'wrap',gap:8}}>
@@ -501,7 +526,7 @@ function Schedule({state,setPage,setJobId}){
                       <div style={{fontSize:12,color:T.muted}}>📅 {d} {MONTHS_TH[month]} {year+543}{j.theme&&` · ${j.theme}`}</div>
                     </div>
                     <div style={{textAlign:'right'}}>
-                      <div style={{fontSize:14,fontWeight:700,color:(inc-exp)>=0?T.green:T.red}}>กำไร {baht(inc-exp)}</div>
+                      <div style={{fontSize:14,fontWeight:700,color:remaining60>=0?T.green:T.red}}>คงเหลืองบ {baht(remaining60)}</div>
                       <div style={{fontSize:11,color:T.muted}}>ราคาตกลง {baht(j.agreedPrice)}</div>
                     </div>
                   </div>
@@ -549,7 +574,7 @@ function Jobs({state,user,save,jobId,setJobId}){
         <div>{sorted.map(j=>{
           const inc=(j.income?.deposit?.received?Number(j.income.deposit.amount)||0:0)+(j.income?.remaining?.received?Number(j.income.remaining.amount)||0:0);
           const exp=(j.expenses||[]).reduce((s,e)=>s+Number(e.amount||0),0);
-          const profit=inc-exp;
+          const remaining60=inc*0.6-exp;
           return (
             <Card key={j.id} onClick={()=>setJobId(j.id)} style={{padding:mob?'14px 16px':'18px 22px'}}>
               <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',gap:8}}>
@@ -560,12 +585,12 @@ function Jobs({state,user,save,jobId,setJobId}){
                     {(j.statusAlerts||[]).length>0&&<Badge c={T.amber}>🔔 {j.statusAlerts.length}/2</Badge>}
                   </div>
                   <div style={{fontSize:12,color:T.muted}}>📅 {dtTH(j.eventDate)}{j.theme&&` · ${j.theme}`}</div>
-                  {!mob&&<div style={{fontSize:12,color:T.muted,marginTop:3}}>รายได้ {baht(inc)} · จ่าย {baht(exp)}</div>}
+                  {!mob&&<div style={{fontSize:12,color:T.muted,marginTop:3}}>รับเงิน {baht(inc)} · ใช้จ่าย {baht(exp)}</div>}
                 </div>
                 <div style={{display:'flex',gap:6,alignItems:'flex-start',flexShrink:0}}>
                   <div style={{textAlign:'right'}}>
                     {mob&&<div style={{fontSize:12,color:T.muted,marginBottom:2}}>{baht(inc)}</div>}
-                    <div style={{fontSize:mob?14:16,fontWeight:700,color:profit>=0?T.green:T.red}}>{mob?baht(profit):`กำไร ${baht(profit)}`}</div>
+                    <div style={{fontSize:mob?14:16,fontWeight:700,color:remaining60>=0?T.green:T.red}}>{mob?baht(remaining60):`คงเหลืองบ ${baht(remaining60)}`}</div>
                   </div>
                   {user.role==='admin'&&(
                     <button onClick={e=>deleteJob(j,e)} title="ลบงาน" style={{background:'none',border:`1px solid ${T.red}44`,borderRadius:6,padding:'4px 8px',color:T.red,cursor:'pointer',fontSize:13,fontFamily:T.ff,marginTop:2}}>🗑</button>
@@ -626,10 +651,15 @@ function JobDetail({job,state,user,save,onBack}){
   const isAdmin=user.role==='admin';
   const mob=useMobile();
   const totalInc=(job.income?.deposit?.received?Number(job.income.deposit.amount)||0:0)+(job.income?.remaining?.received?Number(job.income.remaining.amount)||0:0);
+  const budget60=totalInc*0.6;
   const totalExp=(job.expenses||[]).reduce((s,e)=>s+Number(e.amount||0),0);
-  const profit=totalInc-totalExp;
-  const totalWages=(job.expenses||[]).filter(e=>e.category==='labor').reduce((s,e)=>s+Number(e.amount||0),0);
-  const unreimbursed=(job.expenses||[]).filter(e=>!e.reimbursed);
+  const remaining60=budget60-totalExp;
+  const netProfit40=totalInc*0.4;
+  const workingCapCut=totalInc*0.20;
+  const dividendCut=totalInc*0.15;
+  const bonusCut=totalInc*0.05;
+  const canManageExpense=user.expenseManager===true;
+  const expenseManagerUser=state.users.find(u=>u.expenseManager===true);
   const updateJob=async patch=>{const jobs=state.jobs.map(j=>j.id===job.id?{...j,...patch}:j);await save({jobs});};
   const nextStatus=STATUS[job.status]?.next;
   const handleStatusChange=async nst=>{
@@ -656,12 +686,6 @@ function JobDetail({job,state,user,save,onBack}){
     }
     await save({jobs,hist,notifs});
   };
-  const toggleReimburse=async expId=>{
-    const expenses=(job.expenses||[]).map(e=>e.id===expId?{...e,reimbursed:!e.reimbursed}:e);
-    const e=job.expenses.find(x=>x.id===expId);
-    const hist=[{id:uid(),type:'reimburse',desc:`${e.reimbursed?'ยกเลิก':'ยืนยัน'}เบิกคืน: ${e.description} ${baht(e.amount)}`,userId:user.id,jobId:job.id,createdAt:ts()},...state.hist].slice(0,500);
-    await save({jobs:state.jobs.map(j=>j.id===job.id?{...j,expenses}:j),hist});
-  };
   const deleteExp=async expId=>{
     if(!window.confirm('ลบรายการนี้?')) return;
     const expenses=(job.expenses||[]).filter(e=>e.id!==expId);
@@ -676,18 +700,16 @@ function JobDetail({job,state,user,save,onBack}){
   };
   const uploadSlip=async(field,data)=>{ const income={...job.income,[field]:{...job.income[field],slipData:data}}; await updateJob({income}); };
   const uploadExpSlip=async(expId,data)=>{ const expenses=(job.expenses||[]).map(e=>e.id===expId?{...e,slipData:data}:e); await updateJob({expenses}); };
-  const TABS=[{id:'income',label:'รายรับ 💰'},{id:'expenses',label:'รายจ่าย 🧾'},{id:'reimburse',label:`เบิกคืน${unreimbursed.length>0?` (${unreimbursed.length})`:''}💼`}];
+  const TABS=[{id:'income',label:'รายรับ 💰'},{id:'expenses',label:'ค่าใช้จ่ายงาน (60%) 🧾'}];
   return (
     <div>
-      <div style={{display:'flex',alignItems:'flex-start',gap:12,marginBottom:20,flexWrap:'wrap'}}>
-        <button onClick={onBack} style={{background:T.s2,border:`1px solid ${T.bdr}`,borderRadius:8,padding:'8px 14px',color:T.muted,cursor:'pointer',fontSize:13,fontFamily:T.ff}}>← กลับ</button>
-        <div style={{flex:1,minWidth:0}}>
-          <div style={{display:'flex',alignItems:'center',gap:10,flexWrap:'wrap'}}>
-            <h1 style={{fontSize:mob?18:22,fontWeight:700,color:T.text}}>{job.clientName}</h1>
-            <Badge c={STATUS[job.status]?.color}>{STATUS[job.status]?.label}</Badge>
-          </div>
-          <div style={{fontSize:13,color:T.muted,marginTop:4}}>📅 {dtTH(job.eventDate)}{job.theme&&` · ${job.theme}`} · ราคาตกลง {baht(job.agreedPrice)}</div>
+      <div style={{marginBottom:20}}>
+        <button onClick={onBack} style={{background:T.s2,border:`1px solid ${T.bdr}`,borderRadius:8,padding:'8px 14px',color:T.muted,cursor:'pointer',fontSize:13,fontFamily:T.ff,marginBottom:14}}>← กลับ</button>
+        <div style={{display:'flex',alignItems:'center',gap:8,flexWrap:'wrap',marginBottom:6}}>
+          <h1 style={{fontSize:mob?17:22,fontWeight:700,color:T.text,minWidth:0,overflowWrap:'break-word'}}>{job.clientName}</h1>
+          <Badge c={STATUS[job.status]?.color}>{STATUS[job.status]?.label}</Badge>
         </div>
+        <div style={{fontSize:13,color:T.muted,marginBottom:14}}>📅 {dtTH(job.eventDate)}{job.theme&&` · ${job.theme}`} · ราคาตกลง {baht(job.agreedPrice)}</div>
         <div style={{display:'flex',gap:8,flexWrap:'wrap'}}>
           {isAdmin&&<Btn sm ghost onClick={()=>open('editJob')}>✏️ แก้ไข</Btn>}
           {isAdmin&&nextStatus&&<Btn sm onClick={()=>handleStatusChange(nextStatus)} color={STATUS[nextStatus]?.color}>→ {STATUS[nextStatus]?.label}</Btn>}
@@ -695,12 +717,22 @@ function JobDetail({job,state,user,save,onBack}){
           {!isAdmin&&job.status!=='done'&&<Btn sm color={T.amber} onClick={handleAlert}>🔔 แจ้งเตือน{(job.statusAlerts||[]).length>0?` (${job.statusAlerts.length}/2)`:''}</Btn>}
         </div>
       </div>
-      <div style={{display:'grid',gridTemplateColumns:`repeat(auto-fill,minmax(${mob?'140px':'160px'},1fr))`,gap:12,marginBottom:20}}>
-        <StatCard icon="💰" label="รายรับรวม" value={baht(totalInc)} color={T.green}/>
-        <StatCard icon="🧾" label="รายจ่ายรวม" value={baht(totalExp)} color={T.amber}/>
-        <StatCard icon="💸" label="ค่าจ้าง" value={baht(totalWages)} color={T.blue}/>
-        <StatCard icon="📈" label="กำไรงานนี้" value={baht(profit)} color={profit>=0?T.green:T.red}/>
+      <div style={{display:'grid',gridTemplateColumns:`repeat(auto-fill,minmax(${mob?'140px':'160px'},1fr))`,gap:12,marginBottom:14}}>
+        <StatCard icon="💰" label="รับเงินแล้ว" value={baht(totalInc)} color={T.green}/>
+        <StatCard icon="🧾" label="งบ 60% (บีลาบริหาร)" value={baht(budget60)} color={T.amber}/>
+        <StatCard icon="📤" label="ใช้ไปแล้ว" value={baht(totalExp)} color={T.muted}/>
+        <StatCard icon="📊" label="คงเหลือในงบ" value={baht(remaining60)} color={remaining60>=0?T.green:T.red}/>
       </div>
+      {totalInc>0&&(
+        <Card style={{background:T.s2,marginBottom:14}}>
+          <div style={{fontSize:13,color:T.muted,marginBottom:8}}>💰 กำไรสุทธิ 40% ที่แบ่งเข้ากองกลางบริษัทแล้ว</div>
+          <div style={{display:'flex',gap:18,flexWrap:'wrap'}}>
+            <div><div style={{fontSize:11,color:T.muted}}>🏠 หมุนเวียน 20%</div><div style={{fontSize:15,fontWeight:700,color:T.blue}}>{baht(workingCapCut)}</div></div>
+            <div><div style={{fontSize:11,color:T.muted}}>💸 ปันผล 15%</div><div style={{fontSize:15,fontWeight:700,color:T.green}}>{baht(dividendCut)}</div></div>
+            <div><div style={{fontSize:11,color:T.muted}}>🎁 โบนัส 5%</div><div style={{fontSize:15,fontWeight:700,color:T.gold}}>{baht(bonusCut)}</div></div>
+          </div>
+        </Card>
+      )}
       {job.notes&&<Card style={{background:T.s2}}><p style={{fontSize:13,color:T.muted,marginBottom:2}}>📝 หมายเหตุ</p><p style={{fontSize:14}}>{job.notes}</p></Card>}
       <div style={{display:'flex',gap:4,marginBottom:16,borderBottom:`1px solid ${T.bdr}`,overflowX:'auto'}}>
         {TABS.map(t=>(
@@ -715,6 +747,7 @@ function JobDetail({job,state,user,save,onBack}){
             <h3 style={{fontSize:15,fontWeight:700,color:T.text}}>รายรับ</h3>
             {isAdmin&&<Btn sm onClick={()=>open('editInc')}>✏️ แก้ไขรายรับ</Btn>}
           </div>
+          <p style={{fontSize:12,color:T.muted,marginBottom:12}}>เมื่อกดรับเงินแล้ว ระบบจะแบ่งเงิน 60% เข้างบค่าใช้จ่ายงาน และ 40% เข้ากองทุนบริษัทอัตโนมัติ</p>
           {['deposit','remaining'].map(field=>{
             const inc=job.income?.[field]||{};
             const label=field==='deposit'?'เงินมัดจำ':'ยอดที่เหลือ';
@@ -736,64 +769,33 @@ function JobDetail({job,state,user,save,onBack}){
       )}
       {tab==='expenses'&&(
         <div>
-          <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:14}}>
-            <h3 style={{fontSize:15,fontWeight:700}}>รายจ่าย</h3>
-            <Btn sm onClick={()=>open('addExp')}>+ เพิ่มรายจ่าย</Btn>
+          <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:6,flexWrap:'wrap',gap:8}}>
+            <h3 style={{fontSize:15,fontWeight:700}}>ค่าใช้จ่ายงาน (จากงบ 60%)</h3>
+            {canManageExpense&&<Btn sm onClick={()=>open('addExp')}>+ เพิ่มรายจ่าย</Btn>}
           </div>
+          <p style={{fontSize:12,color:T.muted,marginBottom:14}}>💼 บริหารโดย {expenseManagerUser?.name||'บีลา'} เท่านั้น{!canManageExpense&&' · ดูได้อย่างเดียว'}</p>
           {(job.expenses||[]).length===0?<Empty msg="ยังไม่มีรายจ่าย"/>:
-            [...(job.expenses||[])].sort((a,b)=>(b.date||'').localeCompare(a.date||'')).map(e=>{
-              const payer=state.users.find(u=>u.id===e.paidBy);
-              return (
+            [...(job.expenses||[])].sort((a,b)=>(b.date||'').localeCompare(a.date||'')).map(e=>(
                 <Card key={e.id} style={{padding:'14px 18px'}}>
                   <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',flexWrap:'wrap',gap:8}}>
                     <div style={{flex:1,minWidth:0}}>
                       <div style={{display:'flex',gap:8,alignItems:'center',flexWrap:'wrap',marginBottom:4}}>
                         <span style={{fontWeight:600,fontSize:14}}>{e.description}</span>
                         <Badge c={e.category==='labor'?T.blue:T.amber}>{e.category==='labor'?'💪 ค่าจ้าง':'🛒 วัสดุ'}</Badge>
-                        <Badge c={e.reimbursed?T.green:T.red}>{e.reimbursed?'เบิกคืนแล้ว':'รอเบิกคืน'}</Badge>
                       </div>
-                      <div style={{fontSize:12,color:T.muted}}>💳 {payer?.name||'ไม่ระบุ'}{e.workerName&&` · 👤 ${e.workerName}`}{e.date&&` · ${dtTH(e.date)}`}</div>
+                      <div style={{fontSize:12,color:T.muted}}>{e.workerName&&`👤 ${e.workerName}`}{e.date&&` · ${dtTH(e.date)}`}</div>
                       <div style={{marginTop:8}}><SlipUpload onUpload={d=>uploadExpSlip(e.id,d)} existing={e.slipData}/></div>
                     </div>
                     <div style={{textAlign:'right',flexShrink:0}}>
                       <div style={{fontSize:18,fontWeight:700,color:T.amber}}>{baht(e.amount)}</div>
-                      <div style={{display:'flex',gap:6,marginTop:8,justifyContent:'flex-end'}}>
-                        {isAdmin&&<Btn sm ghost onClick={()=>toggleReimburse(e.id)}>{e.reimbursed?'↩ ยกเลิก':'✓ เบิกคืน'}</Btn>}
-                        {(isAdmin||e.paidBy===user.id)&&<Btn sm danger onClick={()=>deleteExp(e.id)}>ลบ</Btn>}
-                      </div>
+                      {canManageExpense&&<div style={{display:'flex',gap:6,marginTop:8,justifyContent:'flex-end'}}>
+                        <Btn sm danger onClick={()=>deleteExp(e.id)}>ลบ</Btn>
+                      </div>}
                     </div>
                   </div>
                 </Card>
-              );
-            })
+            ))
           }
-        </div>
-      )}
-      {tab==='reimburse'&&(
-        <div>
-          <h3 style={{fontSize:15,fontWeight:700,marginBottom:14}}>สรุปยอดเบิกคืน</h3>
-          {state.users.map(u=>{
-            const myExps=(job.expenses||[]).filter(e=>e.paidBy===u.id);
-            const pnd=myExps.filter(e=>!e.reimbursed);
-            const dn=myExps.filter(e=>e.reimbursed);
-            const pndAmt=pnd.reduce((s,e)=>s+Number(e.amount||0),0);
-            const dnAmt=dn.reduce((s,e)=>s+Number(e.amount||0),0);
-            if(myExps.length===0) return null;
-            return (
-              <Card key={u.id}>
-                <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:10}}>
-                  <Avatar user={u} size={32}/>
-                  <div style={{flex:1,fontWeight:600,fontSize:15}}>{u.name}</div>
-                  <div style={{display:'flex',gap:6,flexWrap:'wrap'}}>
-                    {pndAmt>0&&<Badge c={T.amber}>รอเบิก {baht(pndAmt)}</Badge>}
-                    {dnAmt>0&&<Badge c={T.green}>เบิกแล้ว {baht(dnAmt)}</Badge>}
-                  </div>
-                </div>
-                {pnd.map(e=><div key={e.id} style={{fontSize:12,color:T.muted,padding:'3px 0'}}> · {e.description}: {baht(e.amount)}</div>)}
-              </Card>
-            );
-          })}
-          {unreimbursed.length===0&&<Empty msg="ไม่มียอดรอเบิกคืน ✅"/>}
         </div>
       )}
       {modals.editJob&&<JobForm state={state} user={user} save={save} job={job} onClose={()=>close('editJob')}/>}
@@ -843,24 +845,23 @@ function IncomeForm({job,state,user,save,onClose}){
 }
 
 function ExpenseForm({job,state,user,save,onClose}){
-  const [f,setF]=useState({category:'material',description:'',amount:'',paidBy:user.id,workerName:'',date:new Date().toISOString().split('T')[0]});
+  const [f,setF]=useState({category:'material',description:'',amount:'',workerName:'',date:new Date().toISOString().split('T')[0]});
   const set=k=>e=>setF(p=>({...p,[k]:e.target.value}));
   const submit=async()=>{
     if(!f.description){alert('กรุณากรอกรายการ');return;}
     if(!f.amount){alert('กรุณากรอกจำนวนเงิน');return;}
-    const ne={id:uid(),createdAt:ts(),reimbursed:false,slipData:null,...f,amount:Number(f.amount)};
+    const ne={id:uid(),createdAt:ts(),addedBy:user.id,slipData:null,...f,amount:Number(f.amount)};
     const expenses=[...(job.expenses||[]),ne];
     const jobs=state.jobs.map(j=>j.id===job.id?{...j,expenses}:j);
-    const hist=[{id:uid(),type:'expense',desc:`เพิ่มรายจ่าย: ${f.description} ${baht(f.amount)}`,userId:user.id,jobId:job.id,amount:Number(f.amount),createdAt:ts()},...state.hist].slice(0,500);
+    const hist=[{id:uid(),type:'expense',desc:`เพิ่มรายจ่ายงาน "${job.clientName}": ${f.description} ${baht(f.amount)}`,userId:user.id,jobId:job.id,amount:Number(f.amount),createdAt:ts()},...state.hist].slice(0,500);
     await save({jobs,hist}); onClose();
   };
   return (
-    <Modal title="เพิ่มรายจ่าย" onClose={onClose}>
+    <Modal title="เพิ่มรายจ่าย (งบ 60%)" onClose={onClose}>
       <div style={{display:'flex',flexDirection:'column',gap:14}}>
         <Inp label="ประเภท" type="select" value={f.category} onChange={set('category')} options={[{v:'material',l:'🛒 ค่าวัสดุ/ดอกไม้'},{v:'labor',l:'💪 ค่าจ้างแรงงาน'}]}/>
         <Inp label="รายการ *" value={f.description} onChange={set('description')} placeholder="เช่น ดอกไม้, ผ้า, ค่าจ้างตกแต่ง"/>
         <Inp label="จำนวนเงิน (บาท) *" type="number" value={f.amount} onChange={set('amount')} min="0" step="50"/>
-        <Inp label="ผู้สำรองจ่าย" type="select" value={f.paidBy} onChange={set('paidBy')} options={state.users.map(u=>({v:u.id,l:u.name}))}/>
         {f.category==='labor'&&<Inp label="ชื่อผู้รับจ้าง (ถ้ามี)" value={f.workerName} onChange={set('workerName')} placeholder="ชื่อลูกจ้าง"/>}
         <Inp label="วันที่" type="date" value={f.date} onChange={set('date')}/>
         <div style={{display:'flex',gap:10,justifyContent:'flex-end'}}>
@@ -871,33 +872,178 @@ function ExpenseForm({job,state,user,save,onClose}){
   );
 }
 
-/* ═══ DIVIDENDS ═══ */
-function Dividends({state,user,save}){
-  const [showForm,setShowForm]=useState(false);
-  const {users,jobs,divs}=state;
+/* ═══ FUNDS (กองทุน) ═══ */
+function Funds({state,user,save}){
+  const [tab,setTab]=useState('overview');
   const mob=useMobile();
-  const totalInc=jobs.reduce((s,j)=>s+(j.income?.deposit?.received?Number(j.income.deposit.amount)||0:0)+(j.income?.remaining?.received?Number(j.income.remaining.amount)||0:0),0);
-  const totalExp=jobs.reduce((s,j)=>s+(j.expenses||[]).reduce((a,e)=>a+Number(e.amount||0),0),0);
-  const profit=totalInc-totalExp;
-  const paidDiv=divs.reduce((s,d)=>s+(d.shares||[]).reduce((a,x)=>a+Number(x.amount||0),0),0);
-  const remaining=profit-paidDiv;
+  const pools=computePools(state);
+  const TABS=[{id:'overview',label:'ภาพรวม 📊'},{id:'workingcapital',label:'เงินหมุนเวียน 🏠'},{id:'dividend',label:'ปันผล&โบนัส 💸'},{id:'transfer',label:'โอนย้ายเงิน 🔄'}];
   return (
     <div>
-      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:20}}>
-        <div><h1 style={{fontSize:22,fontWeight:700,color:T.gold}}>การปันผล</h1><p style={{color:T.muted,fontSize:13}}>{divs.length} รอบ</p></div>
-        {user.role==='admin'&&<Btn onClick={()=>setShowForm(true)}>+ สร้างรอบปันผล</Btn>}
+      <div style={{marginBottom:16}}>
+        <h1 style={{fontSize:22,fontWeight:700,color:T.gold}}>กองทุนบริษัท</h1>
+        <p style={{color:T.muted,fontSize:13}}>แบ่งจากรายรับ 40% ของทุกงาน · ทุกคนแก้ไขได้</p>
       </div>
+      <div style={{display:'flex',gap:4,marginBottom:18,borderBottom:`1px solid ${T.bdr}`,overflowX:'auto'}}>
+        {TABS.map(t=>(
+          <button key={t.id} onClick={()=>setTab(t.id)} style={{background:'none',border:'none',borderBottom:`2px solid ${tab===t.id?T.gold:'transparent'}`,padding:'10px 16px',color:tab===t.id?T.gold:T.muted,fontWeight:tab===t.id?600:400,cursor:'pointer',fontSize:mob?13:14,fontFamily:T.ff,transition:'all .15s',whiteSpace:'nowrap'}}>
+            {t.label}
+          </button>
+        ))}
+      </div>
+      {tab==='overview'&&<FundsOverview state={state} pools={pools} mob={mob}/>}
+      {tab==='workingcapital'&&<WorkingCapital state={state} user={user} save={save} pools={pools}/>}
+      {tab==='dividend'&&<DividendTab state={state} user={user} save={save} pools={pools}/>}
+      {tab==='transfer'&&<TransferTab state={state} user={user} save={save} pools={pools}/>}
+    </div>
+  );
+}
+
+function FundsOverview({state,pools,mob}){
+  return (
+    <div>
       <div style={{display:'grid',gridTemplateColumns:`repeat(auto-fill,minmax(${mob?'145px':'180px'},1fr))`,gap:14,marginBottom:20}}>
-        <StatCard icon="📈" label="กำไรสุทธิรวม" value={baht(profit)} color={T.green}/>
-        <StatCard icon="💸" label="ปันผลแล้วทั้งหมด" value={baht(paidDiv)} color={T.amber}/>
-        <StatCard icon="💰" label="คงเหลือ" value={baht(remaining)} color={remaining>0?T.blue:T.red}/>
+        <StatCard icon="💰" label="รับเงินรวมทุกงาน" value={baht(pools.totalReceived)} color={T.text}/>
+        <StatCard icon="🏠" label="เงินหมุนเวียนคงเหลือ" value={baht(pools.workingCapitalBalance)} sub={`จาก ${baht(pools.workingCapitalPoolTotal)} (20%)`} color={T.blue}/>
+        <StatCard icon="💸" label="เงินปันผลคงเหลือ" value={baht(pools.dividendPoolBalance)} sub={`จาก ${baht(pools.dividendPoolTotal)} (15%)`} color={T.green}/>
+        <StatCard icon="🎁" label="เงินโบนัสคงเหลือ" value={baht(pools.bonusPoolBalance)} sub={`จาก ${baht(pools.bonusPoolTotal)} (5%)`} color={T.gold}/>
+      </div>
+      <Card>
+        <h3 style={{fontSize:15,fontWeight:700,marginBottom:12}}>🧾 งบค่าใช้จ่ายแต่ละงาน (60%, บีลาบริหาร)</h3>
+        {state.jobs.length===0?<Empty msg="ยังไม่มีงาน"/>:state.jobs.map(j=>{
+          const b=pools.jobBudgets[j.id];
+          if(!b||b.received===0) return null;
+          return (
+            <div key={j.id} style={{padding:'10px 0',borderBottom:`1px solid ${T.bdr}`}}>
+              <div style={{display:'flex',justifyContent:'space-between',fontSize:13,marginBottom:4}}>
+                <span style={{fontWeight:600}}>{j.clientName}</span>
+                <span style={{color:b.remaining>=0?T.green:T.red,fontWeight:600}}>คงเหลือ {baht(b.remaining)}</span>
+              </div>
+              <div style={{height:6,background:T.s2,borderRadius:4,overflow:'hidden'}}>
+                <div style={{height:'100%',width:`${Math.min(100,b.budget60?(b.spent/b.budget60*100):0)}%`,background:b.remaining>=0?T.amber:T.red,borderRadius:4}}/>
+              </div>
+              <div style={{fontSize:11,color:T.muted,marginTop:3}}>ใช้ {baht(b.spent)} / งบ {baht(b.budget60)}</div>
+            </div>
+          );
+        })}
+      </Card>
+    </div>
+  );
+}
+
+function WorkingCapital({state,user,save,pools}){
+  const [showForm,setShowForm]=useState(false);
+  const list=state.companyExpenses||[];
+  const toggleReimburse=async id=>{
+    const companyExpenses=list.map(e=>e.id===id?{...e,reimbursed:!e.reimbursed}:e);
+    await save({companyExpenses});
+  };
+  const del=async id=>{
+    if(!window.confirm('ลบรายการนี้?')) return;
+    await save({companyExpenses:list.filter(e=>e.id!==id)});
+  };
+  const uploadSlip=async(id,data)=>{
+    await save({companyExpenses:list.map(e=>e.id===id?{...e,slipData:data}:e)});
+  };
+  return (
+    <div>
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:14,flexWrap:'wrap',gap:8}}>
+        <StatCard icon="🏠" label="เงินหมุนเวียนคงเหลือ" value={baht(pools.workingCapitalBalance)} sub={`ใช้ไป ${baht(pools.workingCapitalSpent)} จาก ${baht(pools.workingCapitalPoolTotal)}`} color={T.blue}/>
+        <Btn onClick={()=>setShowForm(true)}>+ เพิ่มรายการ</Btn>
+      </div>
+      {list.length===0?<Empty msg="ยังไม่มีรายการเงินหมุนเวียน"/>:
+        [...list].sort((a,b)=>(b.date||'').localeCompare(a.date||'')).map(e=>{
+          const payer=state.users.find(u=>u.id===e.paidBy);
+          return (
+            <Card key={e.id}>
+              <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',flexWrap:'wrap',gap:8}}>
+                <div style={{flex:1,minWidth:0}}>
+                  <div style={{display:'flex',gap:8,alignItems:'center',flexWrap:'wrap',marginBottom:4}}>
+                    <span style={{fontWeight:600,fontSize:14}}>{e.description}</span>
+                    <Badge c={e.category==='rent'?T.blue:T.amber}>{e.category==='rent'?'🏠 ค่าเช่า':e.category==='supplies'?'📦 ของกลาง':'อื่นๆ'}</Badge>
+                    <Badge c={e.reimbursed?T.green:T.red}>{e.reimbursed?'เบิกคืนแล้ว':'รอเบิกคืน'}</Badge>
+                  </div>
+                  <div style={{fontSize:12,color:T.muted}}>💳 {payer?.name||'ไม่ระบุ'}{e.date&&` · ${dtTH(e.date)}`}</div>
+                  <div style={{marginTop:8}}><SlipUpload onUpload={d=>uploadSlip(e.id,d)} existing={e.slipData}/></div>
+                </div>
+                <div style={{textAlign:'right',flexShrink:0}}>
+                  <div style={{fontSize:18,fontWeight:700,color:T.amber}}>{baht(e.amount)}</div>
+                  <div style={{display:'flex',gap:6,marginTop:8,justifyContent:'flex-end'}}>
+                    <Btn sm ghost onClick={()=>toggleReimburse(e.id)}>{e.reimbursed?'↩ ยกเลิก':'✓ เบิกคืน'}</Btn>
+                    <Btn sm danger onClick={()=>del(e.id)}>ลบ</Btn>
+                  </div>
+                </div>
+              </div>
+            </Card>
+          );
+        })
+      }
+      {showForm&&<CompanyExpenseForm state={state} user={user} save={save} onClose={()=>setShowForm(false)}/>}
+    </div>
+  );
+}
+
+function CompanyExpenseForm({state,user,save,onClose}){
+  const [f,setF]=useState({category:'rent',description:'',amount:'',paidBy:user.id,date:new Date().toISOString().split('T')[0]});
+  const set=k=>e=>setF(p=>({...p,[k]:e.target.value}));
+  const submit=async()=>{
+    if(!f.description){alert('กรุณากรอกรายการ');return;}
+    if(!f.amount){alert('กรุณากรอกจำนวนเงิน');return;}
+    const ne={id:uid(),createdAt:ts(),reimbursed:false,slipData:null,...f,amount:Number(f.amount)};
+    const companyExpenses=[...(state.companyExpenses||[]),ne];
+    const hist=[{id:uid(),type:'expense',desc:`เพิ่มเงินหมุนเวียน: ${f.description} ${baht(f.amount)}`,userId:user.id,amount:Number(f.amount),createdAt:ts()},...state.hist].slice(0,500);
+    await save({companyExpenses,hist}); onClose();
+  };
+  return (
+    <Modal title="เพิ่มรายการเงินหมุนเวียน" onClose={onClose}>
+      <div style={{display:'flex',flexDirection:'column',gap:14}}>
+        <Inp label="ประเภท" type="select" value={f.category} onChange={set('category')} options={[{v:'rent',l:'🏠 ค่าเช่าบ้าน'},{v:'supplies',l:'📦 ของกลาง/อุปกรณ์'},{v:'other',l:'อื่นๆ'}]}/>
+        <Inp label="รายการ *" value={f.description} onChange={set('description')} placeholder="เช่น ค่าเช่าเดือน ก.ค."/>
+        <Inp label="จำนวนเงิน (บาท) *" type="number" value={f.amount} onChange={set('amount')} min="0" step="50"/>
+        <Inp label="ผู้สำรองจ่าย" type="select" value={f.paidBy} onChange={set('paidBy')} options={state.users.map(u=>({v:u.id,l:u.name}))}/>
+        <Inp label="วันที่" type="date" value={f.date} onChange={set('date')}/>
+        <div style={{display:'flex',gap:10,justifyContent:'flex-end'}}>
+          <Btn ghost onClick={onClose}>ยกเลิก</Btn><Btn onClick={submit}>เพิ่มรายการ</Btn>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+function DividendTab({state,user,save,pools}){
+  const [showForm,setShowForm]=useState(false);
+  const [editing,setEditing]=useState(null);
+  const {users,divs}=state;
+  const mob=useMobile();
+  const openNew=()=>{setEditing(null);setShowForm(true);};
+  const openEdit=d=>{setEditing(d);setShowForm(true);};
+  const closeForm=()=>{setShowForm(false);setEditing(null);};
+  const deleteDiv=async d=>{
+    if(!window.confirm(`ลบรอบปันผล ${dtTH(d.date)} ยอด ${baht(d.totalAmount)}?`)) return;
+    const hist=[{id:uid(),type:'delete',desc:`ลบรอบปันผล ${dtTH(d.date)} ยอด ${baht(d.totalAmount)}`,userId:user.id,createdAt:ts()},...state.hist].slice(0,500);
+    await save({divs:state.divs.filter(x=>x.id!==d.id),hist});
+  };
+  return (
+    <div>
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:14,flexWrap:'wrap',gap:8}}>
+        <div style={{display:'flex',gap:14,flexWrap:'wrap'}}>
+          <StatCard icon="💸" label="เงินปันผลคงเหลือ" value={baht(pools.dividendPoolBalance)} color={T.green}/>
+          <StatCard icon="🎁" label="เงินโบนัสคงเหลือ" value={baht(pools.bonusPoolBalance)} color={T.gold}/>
+        </div>
+        <Btn onClick={openNew}>+ สร้างรอบปันผล</Btn>
       </div>
       {divs.length===0?<Empty msg="ยังไม่มีรอบปันผล"/>:
         [...divs].sort((a,b)=>(b.createdAt||'').localeCompare(a.createdAt||'')).map(d=>(
           <Card key={d.id}>
             <div style={{display:'flex',justifyContent:'space-between',marginBottom:12,flexWrap:'wrap',gap:8}}>
               <div><div style={{fontWeight:700,fontSize:16}}>รอบ {dtTH(d.date)}</div>{d.notes&&<div style={{fontSize:12,color:T.muted,marginTop:2}}>{d.notes}</div>}</div>
-              <div style={{fontWeight:700,fontSize:16,color:T.gold}}>{baht(d.totalAmount)}</div>
+              <div style={{display:'flex',alignItems:'center',gap:10}}>
+                <div style={{fontWeight:700,fontSize:16,color:T.gold}}>{baht(d.totalAmount)}</div>
+                <div style={{display:'flex',gap:6}}>
+                  <Btn sm ghost onClick={()=>openEdit(d)}>✏️ แก้ไข</Btn>
+                  <Btn sm danger onClick={()=>deleteDiv(d)}>🗑 ลบ</Btn>
+                </div>
+              </div>
             </div>
             <Sep/>
             <div style={{display:'grid',gridTemplateColumns:`repeat(auto-fill,minmax(${mob?'140px':'160px'},1fr))`,gap:10}}>
@@ -911,40 +1057,57 @@ function Dividends({state,user,save}){
                 ):null;
               })}
             </div>
-            {(d.wages||[]).length>0&&(<><Sep/>
-              <div style={{fontSize:12,color:T.muted,marginBottom:6}}>ค่าจ้างผู้ถือหุ้น</div>
+            {(d.bonus||d.wages||[]).length>0&&(<><Sep/>
+              <div style={{fontSize:12,color:T.muted,marginBottom:6}}>🎁 โบนัส</div>
               <div style={{display:'flex',gap:8,flexWrap:'wrap'}}>
-                {d.wages.map(w=>{const u=users.find(x=>x.id===w.uid);return u?<Badge key={w.uid} c={T.blue}>{u.name}: {baht(w.amount)}</Badge>:null;})}
+                {(d.bonus||d.wages).map(w=>{const u=users.find(x=>x.id===w.uid);return u?<Badge key={w.uid} c={T.gold}>{u.name}: {baht(w.amount)}</Badge>:null;})}
               </div></>
             )}
           </Card>
         ))
       }
-      {showForm&&<DividendForm state={state} user={user} save={save} onClose={()=>setShowForm(false)} profit={profit} paidDiv={paidDiv}/>}
+      {showForm&&<DividendForm state={state} user={user} save={save} onClose={closeForm} pools={pools} editing={editing}/>}
     </div>
   );
 }
 
-function DividendForm({state,user,save,onClose,profit,paidDiv}){
-  const remaining=profit-paidDiv;
-  const [date,setDate]=useState(new Date().toISOString().split('T')[0]);
-  const [total,setTotal]=useState(Math.max(0,remaining).toString());
-  const [notes,setNotes]=useState('');
-  const [wages,setWages]=useState(state.users.map(u=>({uid:u.id,amount:'0',include:false})));
+function DividendForm({state,user,save,onClose,pools,editing}){
+  const editingBonusSum=editing?(editing.bonus||editing.wages||[]).reduce((s,w)=>s+Number(w.amount||0),0):0;
+  const availableDividend=pools.dividendPoolBalance+(editing?editing.totalAmount:0);
+  const availableBonus=pools.bonusPoolBalance+editingBonusSum;
+  const [date,setDate]=useState(editing?.date||new Date().toISOString().split('T')[0]);
+  const [total,setTotal]=useState((editing?editing.totalAmount:Math.max(0,availableDividend)).toString());
+  const [notes,setNotes]=useState(editing?.notes||'');
+  const [bonus,setBonus]=useState(state.users.map(u=>{
+    const existing=(editing?.bonus||editing?.wages||[]).find(w=>w.uid===u.id);
+    return {uid:u.id,amount:existing?String(existing.amount):'0',include:!!existing};
+  }));
   const totalNum=Number(total)||0;
   const shares=state.users.map(u=>({uid:u.id,amount:Math.round(totalNum*u.share/100)}));
-  const setWage=(uid,k,v)=>setWages(p=>p.map(w=>w.uid===uid?{...w,[k]:v}:w));
+  const setB=(uid,k,v)=>setBonus(p=>p.map(w=>w.uid===uid?{...w,[k]:v}:w));
+  const bonusSum=bonus.filter(w=>w.include).reduce((s,w)=>s+(Number(w.amount)||0),0);
   const submit=async()=>{
     if(!total||totalNum<=0){alert('กรอกยอดปันผล');return;}
-    const nd={id:uid(),date,totalAmount:totalNum,notes,shares,wages:wages.filter(w=>w.include&&Number(w.amount)>0).map(w=>({...w,amount:Number(w.amount)})),createdAt:ts(),createdBy:user.id};
-    const hist=[{id:uid(),type:'dividend',desc:`ปันผลรอบ ${dtTH(date)} ยอดรวม ${baht(totalNum)}`,userId:user.id,amount:totalNum,createdAt:ts()},...state.hist].slice(0,500);
-    await save({divs:[nd,...state.divs],hist}); onClose();
+    const bonusList=bonus.filter(w=>w.include&&Number(w.amount)>0).map(w=>({...w,amount:Number(w.amount)}));
+    if(editing){
+      const nd={...editing,date,totalAmount:totalNum,notes,shares,bonus:bonusList};
+      const hist=[{id:uid(),type:'edit',desc:`แก้ไขรอบปันผล ${dtTH(date)} ยอดรวม ${baht(totalNum)}`,userId:user.id,amount:totalNum,createdAt:ts()},...state.hist].slice(0,500);
+      await save({divs:state.divs.map(d=>d.id===editing.id?nd:d),hist});
+    } else {
+      const nd={id:uid(),date,totalAmount:totalNum,notes,shares,bonus:bonusList,createdAt:ts(),createdBy:user.id};
+      const hist=[{id:uid(),type:'dividend',desc:`ปันผลรอบ ${dtTH(date)} ยอดรวม ${baht(totalNum)}`,userId:user.id,amount:totalNum,createdAt:ts()},...state.hist].slice(0,500);
+      await save({divs:[nd,...state.divs],hist});
+    }
+    onClose();
   };
   return (
-    <Modal title="สร้างรอบปันผล" onClose={onClose}>
+    <Modal title={editing?'แก้ไขรอบปันผล':'สร้างรอบปันผล'} onClose={onClose}>
       <div style={{display:'flex',flexDirection:'column',gap:14}}>
         <Inp label="วันที่" type="date" value={date} onChange={e=>setDate(e.target.value)}/>
-        <Inp label="ยอดปันผลรวม (บาท)" type="number" value={total} onChange={e=>setTotal(e.target.value)} min="0"/>
+        <div>
+          <Inp label="ยอดปันผลรวม (บาท)" type="number" value={total} onChange={e=>setTotal(e.target.value)} min="0"/>
+          <p style={{fontSize:11,color:T.muted,marginTop:4}}>เงินปันผลคงเหลือในกองทุน: {baht(availableDividend)}</p>
+        </div>
         <Inp label="หมายเหตุ" value={notes} onChange={e=>setNotes(e.target.value)} placeholder="รอบปันผลนี้..."/>
         <div style={{background:T.s2,borderRadius:10,padding:14}}>
           <p style={{fontSize:13,color:T.muted,marginBottom:8}}>แบ่งตามสัดส่วนหุ้น</p>
@@ -956,18 +1119,102 @@ function DividendForm({state,user,save,onClose,profit,paidDiv}){
           );})}
         </div>
         <div style={{background:T.s2,borderRadius:10,padding:14}}>
-          <p style={{fontSize:13,color:T.muted,marginBottom:8}}>ค่าจ้างผู้ถือหุ้น (ถ้ามี)</p>
-          {wages.map(w=>{const u=state.users.find(x=>x.id===w.uid);return(
+          <div style={{display:'flex',justifyContent:'space-between',marginBottom:8}}>
+            <p style={{fontSize:13,color:T.muted}}>🎁 โบนัส (กำหนดเองรายคน)</p>
+            <span style={{fontSize:12,color:bonusSum>availableBonus?T.red:T.muted}}>{baht(bonusSum)} / {baht(availableBonus)}</span>
+          </div>
+          {bonus.map(w=>{const u=state.users.find(x=>x.id===w.uid);return(
             <div key={w.uid} style={{display:'flex',alignItems:'center',gap:10,marginBottom:8}}>
-              <input type="checkbox" checked={w.include} onChange={e=>setWage(w.uid,'include',e.target.checked)} style={{width:16,height:16,accentColor:T.gold}}/>
+              <input type="checkbox" checked={w.include} onChange={e=>setB(w.uid,'include',e.target.checked)} style={{width:16,height:16,accentColor:T.gold}}/>
               <span style={{fontSize:13,width:70,color:u.color}}>{u.name}</span>
-              {w.include&&<input type="number" value={w.amount} onChange={e=>setWage(w.uid,'amount',e.target.value)} min="0" placeholder="0"
+              {w.include&&<input type="number" value={w.amount} onChange={e=>setB(w.uid,'amount',e.target.value)} min="0" placeholder="0"
                 style={{background:T.bg,border:`1px solid ${T.bdr}`,borderRadius:6,padding:'5px 8px',color:T.text,fontSize:13,width:100,fontFamily:T.ff}}/>}
             </div>
           );})}
+          {bonusSum>availableBonus&&<p style={{fontSize:11,color:T.red,marginTop:4}}>⚠️ ยอดโบนัสเกินกองทุนคงเหลือ</p>}
         </div>
         <div style={{display:'flex',gap:10,justifyContent:'flex-end'}}>
-          <Btn ghost onClick={onClose}>ยกเลิก</Btn><Btn onClick={submit}>บันทึกปันผล</Btn>
+          <Btn ghost onClick={onClose}>ยกเลิก</Btn><Btn onClick={submit}>{editing?'บันทึกการแก้ไข':'บันทึกปันผล'}</Btn>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+/* ═══ TRANSFER (โอนย้ายเงินระหว่างกองทุน) ═══ */
+const POOL_LABEL={workingCapital:{l:'เงินหมุนเวียน',i:'🏠',c:T.blue},dividend:{l:'เงินปันผล',i:'💸',c:T.green},bonus:{l:'เงินโบนัส',i:'🎁',c:T.gold}};
+function TransferTab({state,user,save,pools}){
+  const [showForm,setShowForm]=useState(false);
+  const list=state.transfers||[];
+  const balances={workingCapital:pools.workingCapitalBalance,dividend:pools.dividendPoolBalance,bonus:pools.bonusPoolBalance};
+  const del=async t=>{
+    if(!window.confirm(`ยกเลิกรายการโอน ${baht(t.amount)} (${POOL_LABEL[t.from].l} → ${POOL_LABEL[t.to].l})?`)) return;
+    const hist=[{id:uid(),type:'delete',desc:`ยกเลิกการโอนเงิน ${baht(t.amount)} (${POOL_LABEL[t.from].l}→${POOL_LABEL[t.to].l})`,userId:user.id,createdAt:ts()},...state.hist].slice(0,500);
+    await save({transfers:list.filter(x=>x.id!==t.id),hist});
+  };
+  return (
+    <div>
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:14,flexWrap:'wrap',gap:8}}>
+        <p style={{fontSize:13,color:T.muted}}>ย้ายเงินระหว่าง 3 กองทุน เช่น เติมเงินหมุนเวียนจากกองปันผล</p>
+        <Btn onClick={()=>setShowForm(true)}>+ โอนเงิน</Btn>
+      </div>
+      <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(140px,1fr))',gap:12,marginBottom:18}}>
+        {Object.keys(POOL_LABEL).map(k=>(
+          <StatCard key={k} icon={POOL_LABEL[k].i} label={POOL_LABEL[k].l} value={baht(balances[k])} color={POOL_LABEL[k].c}/>
+        ))}
+      </div>
+      {list.length===0?<Empty msg="ยังไม่มีการโอนย้ายเงิน"/>:
+        [...list].sort((a,b)=>(b.createdAt||'').localeCompare(a.createdAt||'')).map(t=>{
+          const byUser=state.users.find(u=>u.id===t.createdBy);
+          return (
+            <Card key={t.id}>
+              <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',flexWrap:'wrap',gap:8}}>
+                <div style={{flex:1,minWidth:0}}>
+                  <div style={{display:'flex',alignItems:'center',gap:8,fontSize:14,fontWeight:600,marginBottom:4,flexWrap:'wrap'}}>
+                    <Badge c={POOL_LABEL[t.from].c}>{POOL_LABEL[t.from].i} {POOL_LABEL[t.from].l}</Badge>
+                    <span style={{color:T.muted}}>→</span>
+                    <Badge c={POOL_LABEL[t.to].c}>{POOL_LABEL[t.to].i} {POOL_LABEL[t.to].l}</Badge>
+                  </div>
+                  {t.note&&<div style={{fontSize:12,color:T.muted}}>{t.note}</div>}
+                  <div style={{fontSize:11,color:T.muted,marginTop:2}}>{dtTH(t.date)}{byUser&&` · ${byUser.name}`}</div>
+                </div>
+                <div style={{textAlign:'right',flexShrink:0}}>
+                  <div style={{fontSize:18,fontWeight:700,color:T.gold}}>{baht(t.amount)}</div>
+                  <Btn sm danger onClick={()=>del(t)}>ยกเลิก</Btn>
+                </div>
+              </div>
+            </Card>
+          );
+        })
+      }
+      {showForm&&<TransferForm state={state} user={user} save={save} balances={balances} onClose={()=>setShowForm(false)}/>}
+    </div>
+  );
+}
+
+function TransferForm({state,user,save,balances,onClose}){
+  const [f,setF]=useState({from:'workingCapital',to:'dividend',amount:'',note:'',date:new Date().toISOString().split('T')[0]});
+  const set=k=>e=>setF(p=>({...p,[k]:e.target.value}));
+  const amtNum=Number(f.amount)||0;
+  const overBalance=amtNum>balances[f.from];
+  const submit=async()=>{
+    if(f.from===f.to){alert('กองต้นทางและปลายทางต้องไม่ใช่กองเดียวกัน');return;}
+    if(!amtNum||amtNum<=0){alert('กรอกจำนวนเงิน');return;}
+    const nt={id:uid(),from:f.from,to:f.to,amount:amtNum,note:f.note,date:f.date,createdBy:user.id,createdAt:ts()};
+    const hist=[{id:uid(),type:'transfer',desc:`โอนเงิน ${baht(amtNum)} จาก${POOL_LABEL[f.from].l} → ${POOL_LABEL[f.to].l}`,userId:user.id,amount:amtNum,createdAt:ts()},...state.hist].slice(0,500);
+    await save({transfers:[nt,...(state.transfers||[])],hist}); onClose();
+  };
+  return (
+    <Modal title="โอนย้ายเงินระหว่างกองทุน" onClose={onClose}>
+      <div style={{display:'flex',flexDirection:'column',gap:14}}>
+        <Inp label="จากกอง" type="select" value={f.from} onChange={set('from')} options={Object.keys(POOL_LABEL).map(k=>({v:k,l:`${POOL_LABEL[k].i} ${POOL_LABEL[k].l} (คงเหลือ ${baht(balances[k])})`}))}/>
+        <Inp label="ไปกอง" type="select" value={f.to} onChange={set('to')} options={Object.keys(POOL_LABEL).map(k=>({v:k,l:`${POOL_LABEL[k].i} ${POOL_LABEL[k].l} (คงเหลือ ${baht(balances[k])})`}))}/>
+        <Inp label="จำนวนเงิน (บาท) *" type="number" value={f.amount} onChange={set('amount')} min="0" step="50"/>
+        {overBalance&&<p style={{fontSize:11,color:T.red}}>⚠️ ยอดโอนเกินยอดคงเหลือในกองต้นทาง</p>}
+        <Inp label="หมายเหตุ" value={f.note} onChange={set('note')} placeholder="เช่น เติมเงินหมุนเวียนเพราะค่าเช่าขาด"/>
+        <Inp label="วันที่" type="date" value={f.date} onChange={set('date')}/>
+        <div style={{display:'flex',gap:10,justifyContent:'flex-end'}}>
+          <Btn ghost onClick={onClose}>ยกเลิก</Btn><Btn onClick={submit}>โอนเงิน</Btn>
         </div>
       </div>
     </Modal>
@@ -977,7 +1224,7 @@ function DividendForm({state,user,save,onClose,profit,paidDiv}){
 /* ═══ HISTORY ═══ */
 function History({state}){
   const {hist,jobs,users}=state;
-  const TYPES={create:{c:T.blue,i:'🆕'},edit:{c:T.muted,i:'✏️'},delete:{c:T.red,i:'🗑'},income:{c:T.green,i:'💰'},expense:{c:T.amber,i:'🧾'},reimburse:{c:T.blue,i:'💼'},status:{c:T.gold,i:'🔄'},alert:{c:T.amber,i:'🔔'},auto:{c:T.gold,i:'🤖'},dividend:{c:T.gold,i:'💸'},default:{c:T.muted,i:'📌'}};
+  const TYPES={create:{c:T.blue,i:'🆕'},edit:{c:T.muted,i:'✏️'},delete:{c:T.red,i:'🗑'},income:{c:T.green,i:'💰'},expense:{c:T.amber,i:'🧾'},reimburse:{c:T.blue,i:'💼'},status:{c:T.gold,i:'🔄'},alert:{c:T.amber,i:'🔔'},auto:{c:T.gold,i:'🤖'},dividend:{c:T.gold,i:'💸'},transfer:{c:T.blue,i:'🔄'},default:{c:T.muted,i:'📌'}};
   const exportAll=()=>{
     const rows=[['วันที่','ประเภท','รายการ','จำนวน','ผู้ดำเนินการ','งาน']];
     hist.forEach(h=>{const u=users.find(x=>x.id===h.userId);const j=h.jobId?jobs.find(x=>x.id===h.jobId):null;rows.push([dtFull(h.createdAt),h.type,h.desc,h.amount||'',u?.name||'',j?.clientName||'']);});
@@ -1080,6 +1327,7 @@ function Settings({state,user,save,setUser}){
   const mob=useMobile();
   const set=(id,k)=>e=>setUsers(p=>p.map(u=>u.id===id?{...u,[k]:e.target.value}:u));
   const setRole=(id,role)=>setUsers(p=>p.map(u=>u.id===id?{...u,role}:u));
+  const setExpenseManager=(id)=>setUsers(p=>p.map(u=>({...u,expenseManager:u.id===id})));
   const setColor=(id,color)=>setUsers(p=>p.map(u=>u.id===id?{...u,color}:u));
   const totalShare=users.reduce((s,u)=>s+Number(u.share||0),0);
 
@@ -1174,6 +1422,7 @@ function Settings({state,user,save,setUser}){
                 <div style={{display:'flex',gap:6,flexWrap:'wrap'}}>
                   <button onClick={()=>setRole(u.id,'admin')} style={{background:u.role==='admin'?T.gold+'33':'transparent',border:`1px solid ${u.role==='admin'?T.gold:T.bdr}`,borderRadius:6,padding:'4px 10px',color:u.role==='admin'?T.gold:T.muted,cursor:'pointer',fontSize:11,fontFamily:T.ff}}>Admin</button>
                   <button onClick={()=>setRole(u.id,'member')} style={{background:u.role==='member'?T.blue+'33':'transparent',border:`1px solid ${u.role==='member'?T.blue:T.bdr}`,borderRadius:6,padding:'4px 10px',color:u.role==='member'?T.blue:T.muted,cursor:'pointer',fontSize:11,fontFamily:T.ff}}>Member</button>
+                  <button onClick={()=>setExpenseManager(u.id)} title="ผู้บริหารงบ 60%" style={{background:u.expenseManager?T.amber+'33':'transparent',border:`1px solid ${u.expenseManager?T.amber:T.bdr}`,borderRadius:6,padding:'4px 10px',color:u.expenseManager?T.amber:T.muted,cursor:'pointer',fontSize:11,fontFamily:T.ff}}>💼 ผู้คุมงบ 60%</button>
                   {u.id!==user.id&&<button onClick={()=>removeUser(u.id)} style={{background:'transparent',border:`1px solid ${T.red}44`,borderRadius:6,padding:'4px 8px',color:T.red,cursor:'pointer',fontSize:11,fontFamily:T.ff}}>ลบ</button>}
                 </div>
               )}
@@ -1245,15 +1494,22 @@ function App(){
   useEffect(()=>{
     const init=async()=>{
       try {
-        const users   =await DB.get('users')    ||SEED_USERS;
+        let users   =await DB.get('users')    ||SEED_USERS;
         const jobs    =await DB.get('jobs')     ||[];
         const divs    =await DB.get('divs')     ||[];
         const notifs  =await DB.get('notifs')   ||[];
         const hist    =await DB.get('hist')     ||[];
         const settings=await DB.get('settings') ||SEED_SETTINGS;
+        const companyExpenses=await DB.get('companyExpenses') ||[];
+        const transfers=await DB.get('transfers') ||[];
         const existing=await DB.get('users');
         if(!existing) await DB.set('users',SEED_USERS);
-        setState({users,jobs,divs,notifs,hist,settings});
+        else if(!users.some(u=>u.expenseManager===true)){
+          const bila=users.find(u=>u.id==='bila');
+          users=users.map(u=>({...u,expenseManager:bila?u.id==='bila':u.id===users[0].id}));
+          await DB.set('users',users);
+        }
+        setState({users,jobs,divs,notifs,hist,settings,companyExpenses,transfers});
         document.title=(settings||SEED_SETTINGS).appName;
         setLoading(false);
       } catch(e){
@@ -1299,7 +1555,7 @@ function App(){
       {page==='dashboard'&&<Dashboard state={state} user={user} save={save} setPage={setPageNav} setJobId={setJobId}/>}
       {page==='schedule'&&<Schedule state={state} user={user} save={save} setPage={setPageNav} setJobId={setJobId}/>}
       {page==='jobs'&&<Jobs state={state} user={user} save={save} jobId={jobId} setJobId={setJobId}/>}
-      {page==='divs'&&<Dividends state={state} user={user} save={save}/>}
+      {page==='funds'&&<Funds state={state} user={user} save={save}/>}
       {page==='hist'&&<History state={state} user={user} save={save}/>}
       {page==='notifs'&&<Notifications state={state} user={user} save={save}/>}
       {page==='settings'&&<Settings state={state} user={user} save={save} setUser={setUser}/>}
