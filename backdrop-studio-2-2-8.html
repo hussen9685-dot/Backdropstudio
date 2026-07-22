@@ -67,7 +67,8 @@ const SEED_USERS = [
   {id:'wannee',name:'วันณี', pin:'3234', role:'member', share:25, color:'#72C095', photo:null, expenseManager:false},
   {id:'nana',  name:'นานา',  pin:'4234', role:'member', share:25, color:'#72A0C8', photo:null, expenseManager:false},
 ];
-const SEED_SETTINGS = { appName:'Backdrop Studio', appIcon:'💐', subtitle:'ระบบบัญชีธุรกิจ' };
+const DEFAULT_RATIO={jobBudget:60,workingCapital:20,dividend:15,bonus:5};
+const SEED_SETTINGS = { appName:'Backdrop Studio', appIcon:'💐', subtitle:'ระบบบัญชีธุรกิจ', splitRatios:{...DEFAULT_RATIO} };
 const PALETTE = ['#D4AF70','#E8968A','#72C095','#72A0C8','#C89FD4','#F4A261','#4FC3F7','#A8D48A','#E8C860','#FF8A65'];
 
 /* ═══ HELPERS ═══ */
@@ -77,31 +78,61 @@ const baht  = n  => '฿'+new Intl.NumberFormat('th-TH').format(Math.round(n||0)
 const dtTH  = iso => iso?new Date(iso).toLocaleDateString('th-TH',{day:'2-digit',month:'short',year:'2-digit'}):'-';
 const dtFull= iso => iso?new Date(iso).toLocaleString('th-TH',{day:'numeric',month:'short',year:'2-digit',hour:'2-digit',minute:'2-digit'}):'-';
 
-/* ═══ POOL CALCULATOR — splits job income 60% (job expense fund) / 40% (net profit: 20% working capital + 15% dividend + 5% bonus) ═══ */
+/* ═══ รายรับต่องาน (รวมรายการเสริม เช่น ค่าน้ำมัน ช่อดอกไม้ แพ็คเกจเสริม) ═══ */
+function jobExtrasTotal(j,onlyReceived){
+  return (j.income?.extras||[]).reduce((s,x)=>s+((!onlyReceived||x.received)?Number(x.amount)||0:0),0);
+}
+function jobReceivedTotal(j){
+  const dep=j.income?.deposit?.received?Number(j.income.deposit.amount)||0:0;
+  const rem=j.income?.remaining?.received?Number(j.income.remaining.amount)||0:0;
+  return dep+rem+jobExtrasTotal(j,true);
+}
+function jobExpectedTotal(j){
+  return (Number(j.agreedPrice)||0)+jobExtrasTotal(j,false);
+}
+/* แต่ละรายการรับเงิน (มัดจำ/ยอดคงเหลือ/รายการเสริม) จะ "ล็อก" สัดส่วนแบ่ง ณ ตอนที่ติ๊กรับเงินแล้ว
+   เก็บไว้ที่ item.ratio — ถ้าไม่มี (ข้อมูลเก่าก่อนมีฟีเจอร์นี้) จะ fallback เป็น DEFAULT_RATIO (60/20/15/5) */
+function jobPoolCuts(j){
+  let jobBudget=0, workingCapital=0, dividend=0, bonus=0, received=0;
+  const add=item=>{
+    if(!item||!item.received) return;
+    const amt=Number(item.amount)||0;
+    const r=item.ratio||DEFAULT_RATIO;
+    jobBudget+=amt*(Number(r.jobBudget)||0)/100;
+    workingCapital+=amt*(Number(r.workingCapital)||0)/100;
+    dividend+=amt*(Number(r.dividend)||0)/100;
+    bonus+=amt*(Number(r.bonus)||0)/100;
+    received+=amt;
+  };
+  add(j.income?.deposit);
+  add(j.income?.remaining);
+  (j.income?.extras||[]).forEach(add);
+  return {jobBudget,workingCapital,dividend,bonus,received};
+}
+
+/* ═══ POOL CALCULATOR — แบ่งรายรับแต่ละงานตามสัดส่วนที่ล็อกไว้ ณ ตอนรับเงิน (ตั้งค่าได้ในหน้าตั้งค่า) ═══ */
 function computePools(state){
   const jobs=state.jobs||[], divs=state.divs||[], companyExpenses=state.companyExpenses||[], transfers=state.transfers||[];
-  let totalReceived=0;
+  let totalReceived=0, totalExpected=0, workingCapitalPoolTotal=0, dividendPoolTotal=0, bonusPoolTotal=0;
   const jobBudgets={};
   jobs.forEach(j=>{
-    const dep=j.income?.deposit?.received?Number(j.income.deposit.amount)||0:0;
-    const rem=j.income?.remaining?.received?Number(j.income.remaining.amount)||0:0;
-    const received=dep+rem;
-    totalReceived+=received;
-    const budget60=received*0.6;
+    const cuts=jobPoolCuts(j);
+    totalReceived+=cuts.received;
+    totalExpected+=jobExpectedTotal(j);
+    workingCapitalPoolTotal+=cuts.workingCapital;
+    dividendPoolTotal+=cuts.dividend;
+    bonusPoolTotal+=cuts.bonus;
     const spent=(j.expenses||[]).reduce((s,e)=>s+Number(e.amount||0),0);
-    jobBudgets[j.id]={received,budget60,spent,remaining:budget60-spent};
+    jobBudgets[j.id]={received:cuts.received,budget60:cuts.jobBudget,spent,remaining:cuts.jobBudget-spent};
   });
   const netTransfer=pool=>transfers.reduce((s,t)=>s+(t.to===pool?Number(t.amount||0):0)-(t.from===pool?Number(t.amount||0):0),0);
-  const workingCapitalPoolTotal=totalReceived*0.20;
   const workingCapitalSpent=companyExpenses.reduce((s,e)=>s+Number(e.amount||0),0);
   const workingCapitalBalance=workingCapitalPoolTotal-workingCapitalSpent+netTransfer('workingCapital');
-  const dividendPoolTotal=totalReceived*0.15;
   const dividendPaidTotal=divs.reduce((s,d)=>s+Number(d.totalAmount||0),0);
   const dividendPoolBalance=dividendPoolTotal-dividendPaidTotal+netTransfer('dividend');
-  const bonusPoolTotal=totalReceived*0.05;
   const bonusPaidTotal=divs.reduce((s,d)=>s+((d.bonus||d.wages||[]).reduce((a,x)=>a+Number(x.amount||0),0)),0);
   const bonusPoolBalance=bonusPoolTotal-bonusPaidTotal+netTransfer('bonus');
-  return {totalReceived,jobBudgets,workingCapitalPoolTotal,workingCapitalSpent,workingCapitalBalance,dividendPoolTotal,dividendPaidTotal,dividendPoolBalance,bonusPoolTotal,bonusPaidTotal,bonusPoolBalance};
+  return {totalReceived,totalExpected,jobBudgets,workingCapitalPoolTotal,workingCapitalSpent,workingCapitalBalance,dividendPoolTotal,dividendPaidTotal,dividendPoolBalance,bonusPoolTotal,bonusPaidTotal,bonusPoolBalance};
 }
 
 /* ═══ HOOK ═══ */
@@ -146,6 +177,70 @@ function PhotoAvatar({user,size=36,canEdit,onUpload}){
         const r=new FileReader(); r.onload=ev=>onUpload(ev.target.result); r.readAsDataURL(f);
         e.target.value='';
       }}/>
+    </div>
+  );
+}
+
+/* บีบอัดรูปภาพ: crop กลางให้เป็นสี่เหลี่ยมจัตุรัส ย่อขนาด แล้วลดคุณภาพ JPEG จนกว่าจะได้ไฟล์เล็กพอ */
+function compressImageFile(file,{maxDim=256,maxBytes=300*1024}={}){
+  return new Promise((resolve,reject)=>{
+    const reader=new FileReader();
+    reader.onload=e=>{
+      const img=new Image();
+      img.onload=()=>{
+        const side=Math.min(img.width,img.height);
+        const sx=(img.width-side)/2, sy=(img.height-side)/2;
+        const size=Math.min(maxDim,side);
+        const canvas=document.createElement('canvas');
+        canvas.width=size; canvas.height=size;
+        const ctx=canvas.getContext('2d');
+        ctx.drawImage(img,sx,sy,side,side,0,0,size,size);
+        let quality=0.9;
+        let dataUrl=canvas.toDataURL('image/jpeg',quality);
+        while(dataUrl.length*0.75>maxBytes&&quality>0.25){
+          quality-=0.1;
+          dataUrl=canvas.toDataURL('image/jpeg',quality);
+        }
+        resolve(dataUrl);
+      };
+      img.onerror=()=>reject(new Error('โหลดรูปภาพไม่ได้'));
+      img.src=e.target.result;
+    };
+    reader.onerror=()=>reject(new Error('อ่านไฟล์ไม่ได้'));
+    reader.readAsDataURL(file);
+  });
+}
+const isImgIcon=v=>typeof v==='string'&&v.startsWith('data:image');
+function AppIcon({icon,size=32}){
+  if(isImgIcon(icon)) return <img src={icon} alt="icon" style={{width:size,height:size,borderRadius:'50%',objectFit:'cover',flexShrink:0}}/>;
+  return <span style={{fontSize:size*0.7,lineHeight:1}}>{icon||'💐'}</span>;
+}
+function IconPickerField({value,onChange}){
+  const inp=useRef();
+  const [busy,setBusy]=useState(false);
+  const handleFile=async e=>{
+    const f=e.target.files[0]; if(!f) return;
+    if(!f.type.startsWith('image/')){alert('กรุณาเลือกไฟล์รูปภาพ');return;}
+    setBusy(true);
+    try{
+      const dataUrl=await compressImageFile(f,{maxDim:256,maxBytes:300*1024});
+      onChange(dataUrl);
+    }catch(err){ alert('ไม่สามารถประมวลผลรูปภาพนี้ได้'); }
+    setBusy(false);
+    e.target.value='';
+  };
+  return (
+    <div style={{display:'flex',alignItems:'center',gap:14,flexWrap:'wrap'}}>
+      <div onClick={()=>inp.current.click()}
+        style={{width:64,height:64,borderRadius:'50%',border:`2px solid ${T.bdr}`,background:T.s2,display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer',overflow:'hidden',flexShrink:0,position:'relative'}}>
+        <AppIcon icon={value} size={38}/>
+        {busy&&<div style={{position:'absolute',inset:0,background:'rgba(0,0,0,.55)',display:'flex',alignItems:'center',justifyContent:'center'}}><Spin/></div>}
+      </div>
+      <div style={{display:'flex',flexDirection:'column',gap:6}}>
+        <Btn sm ghost onClick={()=>inp.current.click()}>📷 อัปโหลดรูป</Btn>
+        {isImgIcon(value)&&<button onClick={()=>onChange('💐')} style={{background:'none',border:'none',color:T.red,fontSize:12,cursor:'pointer',fontFamily:T.ff,textAlign:'left'}}>🗑 ลบรูป กลับไปใช้ Emoji</button>}
+      </div>
+      <input ref={inp} type="file" accept="image/*" style={{display:'none'}} onChange={handleFile}/>
     </div>
   );
 }
@@ -247,7 +342,7 @@ function LoginPage({users,onLogin,settings}){
     <div style={{minHeight:'100vh',background:T.bg,display:'flex',alignItems:'center',justifyContent:'center',padding:20}}>
       <div style={{width:'100%',maxWidth:400,textAlign:'center'}}>
         <div style={{marginBottom:32}}>
-          <div style={{fontSize:48,marginBottom:12}}>{ic}</div>
+          <div style={{marginBottom:12,display:'flex',justifyContent:'center'}}><AppIcon icon={ic} size={64}/></div>
           <h1 style={{fontSize:26,fontWeight:700,color:T.gold,marginBottom:4}}>{nm}</h1>
           <p style={{color:T.muted,fontSize:14}}>{sub}</p>
         </div>
@@ -292,7 +387,7 @@ function Sidebar({page,setPage,user,onLogout,unread,settings}){
   return (
     <div style={{width:220,background:T.s1,borderRight:`1px solid ${T.bdr}`,display:'flex',flexDirection:'column',flexShrink:0,height:'100vh'}}>
       <div style={{padding:'24px 20px 16px',borderBottom:`1px solid ${T.bdr}`}}>
-        <div style={{fontSize:22,marginBottom:4}}>{ic}</div>
+        <div style={{marginBottom:4}}><AppIcon icon={ic} size={30}/></div>
         <div style={{fontSize:15,fontWeight:700,color:T.gold}}>{nm}</div>
         <div style={{fontSize:11,color:T.muted,marginTop:2}}>{settings?.subtitle||'ระบบบัญชีธุรกิจ'}</div>
       </div>
@@ -370,12 +465,31 @@ function BottomNav({page,setPage,user,onLogout,unread}){
 }
 
 /* ═══ DASHBOARD ═══ */
+const MONTHS_TH=['มกราคม','กุมภาพันธ์','มีนาคม','เมษายน','พฤษภาคม','มิถุนายน','กรกฎาคม','สิงหาคม','กันยายน','ตุลาคม','พฤศจิกายน','ธันวาคม'];
 function Dashboard({state,user,setPage,setJobId}){
   const {users,jobs}=state;
   const mob=useMobile();
   const pools=computePools(state);
+  const now=new Date();
+  const [year,setYear]=useState(now.getFullYear());
+  const [month,setMonth]=useState(now.getMonth());
+  const prevM=()=>{ if(month===0){setMonth(11);setYear(y=>y-1);}else setMonth(m=>m-1); };
+  const nextM=()=>{ if(month===11){setMonth(0);setYear(y=>y+1);}else setMonth(m=>m+1); };
+  const thisMonth=()=>{setYear(now.getFullYear());setMonth(now.getMonth());};
+  const monthJobs=jobs.filter(j=>{
+    if(!j.eventDate) return false;
+    const d=new Date(j.eventDate);
+    return d.getFullYear()===year&&d.getMonth()===month;
+  });
+  const monthReceived=monthJobs.reduce((s,j)=>s+jobReceivedTotal(j),0);
+  const monthExpected=monthJobs.reduce((s,j)=>s+jobExpectedTotal(j),0);
+  const monthExpenses=monthJobs.reduce((s,j)=>s+(j.expenses||[]).reduce((a,e)=>a+Number(e.amount||0),0),0);
+  const monthCuts=monthJobs.reduce((s,j)=>{const c=jobPoolCuts(j);return{workingCapital:s.workingCapital+c.workingCapital,dividend:s.dividend+c.dividend,bonus:s.bonus+c.bonus};},{workingCapital:0,dividend:0,bonus:0});
+  const monthWorkingCap=monthCuts.workingCapital;
+  const monthDividend=monthCuts.dividend;
+  const monthBonus=monthCuts.bonus;
   const pending=jobs.filter(j=>j.status!=='done');
-  const unpaidJobs=jobs.filter(j=>j.income&&((!j.income.deposit?.received&&j.income.deposit?.amount>0)||(!j.income.remaining?.received&&j.income.remaining?.amount>0)));
+  const unpaidJobs=jobs.filter(j=>j.income&&((!j.income.deposit?.received&&j.income.deposit?.amount>0)||(!j.income.remaining?.received&&j.income.remaining?.amount>0)||(j.income.extras||[]).some(x=>!x.received&&x.amount>0)));
   const overBudgetJobs=jobs.filter(j=>(pools.jobBudgets[j.id]?.remaining||0)<0);
   return (
     <div>
@@ -384,17 +498,24 @@ function Dashboard({state,user,setPage,setJobId}){
         <p style={{color:T.muted,fontSize:13}}>สรุปสถานะทางการเงินทั้งหมด</p>
       </div>
       <div style={{display:'grid',gridTemplateColumns:`repeat(auto-fill,minmax(${mob?'145px':'200px'},1fr))`,gap:14,marginBottom:20}}>
-        <StatCard icon="💰" label="รับเงินรวม" value={baht(pools.totalReceived)} sub={`${jobs.filter(j=>j.income?.deposit?.received||j.income?.remaining?.received).length} งานรับเงินแล้ว`}/>
-        <StatCard icon="🏠" label="เงินหมุนเวียนคงเหลือ" value={baht(pools.workingCapitalBalance)} sub="กองกลาง 20%" color={T.blue}/>
-        <StatCard icon="💸" label="เงินปันผลคงเหลือ" value={baht(pools.dividendPoolBalance)} sub="กองกลาง 15%" color={T.green}/>
-        <StatCard icon="🎁" label="เงินโบนัสคงเหลือ" value={baht(pools.bonusPoolBalance)} sub="กองกลาง 5%" color={T.gold}/>
+        <div style={{background:T.s1,border:`1px solid ${T.bdr}`,borderRadius:14,padding:'18px 20px'}}>
+          <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:8}}>
+            <span style={{fontSize:11,color:T.muted,textTransform:'uppercase',letterSpacing:'.06em'}}>รายได้ / รับเงิน</span>
+            <span style={{fontSize:20,opacity:.65}}>📈</span>
+          </div>
+          <div style={{fontSize:22,fontWeight:700,color:T.amber}}>{baht(pools.totalExpected)}</div>
+          <div style={{fontSize:12,color:T.muted,marginTop:4}}>รายได้รวมทั้งหมด (รวมที่ยังไม่ได้รับ)</div>
+          <div style={{fontSize:18,fontWeight:700,color:T.green,marginTop:10}}>{baht(pools.totalReceived)}</div>
+          <div style={{fontSize:12,color:T.muted,marginTop:2}}>รับเงินรวมแล้วจริง · {jobs.filter(j=>j.income?.deposit?.received||j.income?.remaining?.received).length} งาน</div>
+        </div>
+        <StatCard icon="🏦" label="เงินคงเหลือจริงในระบบ" value={baht(pools.workingCapitalBalance+pools.dividendPoolBalance+pools.bonusPoolBalance)} sub="หมุนเวียน+ปันผล+โบนัส หลังหักต้นทุน" color={T.green}/>
       </div>
       <Card>
-        <h3 style={{fontSize:15,fontWeight:700,color:T.text,marginBottom:14}}>📊 ส่วนแบ่งปันผลแต่ละคน (จากกองเงินปันผล 15%)</h3>
+        <h3 style={{fontSize:15,fontWeight:700,color:T.text,marginBottom:14}}>📊 ส่วนแบ่งปันผลแต่ละคน (จากเงินปันผลคงเหลือ {baht(pools.dividendPoolBalance)})</h3>
         <div style={{display:'grid',gridTemplateColumns:`repeat(auto-fill,minmax(${mob?'145px':'180px'},1fr))`,gap:12}}>
           {users.map(u=>{
             const myDiv=state.divs.reduce((s,d)=>s+((d.shares||[]).find(x=>x.uid===u.id)?.amount||0),0);
-            const myEntitlement=pools.dividendPoolTotal*u.share/100;
+            const myEntitlement=pools.dividendPoolBalance*u.share/100;
             const myBonus=state.divs.reduce((s,d)=>s+((d.bonus||d.wages||[]).find(x=>x.uid===u.id)?.amount||0),0);
             return (
               <div key={u.id} style={{background:T.s2,border:`1px solid ${T.bdr}`,borderRadius:10,padding:'14px 16px'}}>
@@ -408,6 +529,33 @@ function Dashboard({state,user,setPage,setJobId}){
             );
           })}
         </div>
+      </Card>
+      <Card style={{marginBottom:20}}>
+        <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',flexWrap:'wrap',gap:10,marginBottom:14}}>
+          <h3 style={{fontSize:15,fontWeight:700,color:T.text}}>📅 สรุปยอดรายเดือน (ตามวันที่จัดงาน)</h3>
+          <div style={{display:'flex',gap:8,alignItems:'center'}}>
+            <Btn sm ghost onClick={prevM}>◀</Btn>
+            <span style={{fontSize:14,fontWeight:600,minWidth:mob?110:140,textAlign:'center'}}>{MONTHS_TH[month]} {year+543}</span>
+            <Btn sm ghost onClick={nextM}>▶</Btn>
+            <Btn sm ghost onClick={thisMonth}>เดือนนี้</Btn>
+          </div>
+        </div>
+        {monthJobs.length===0?<Empty msg="ไม่มีงานในเดือนนี้"/>:(
+          <>
+            <div style={{display:'grid',gridTemplateColumns:`repeat(auto-fill,minmax(${mob?'130px':'160px'},1fr))`,gap:10,marginBottom:14}}>
+              <StatCard icon="📋" label="จำนวนงาน" value={monthJobs.length}/>
+              <StatCard icon="📈" label="รายได้รวมทั้งหมด" value={baht(monthExpected)} sub="รวมยังไม่ได้รับ" color={T.amber}/>
+              <StatCard icon="💰" label="รับเงินแล้ว" value={baht(monthReceived)} color={T.green}/>
+              <StatCard icon="🧾" label="ค่าใช้จ่ายในงาน" value={baht(monthExpenses)} color={T.muted}/>
+            </div>
+            <div style={{fontSize:12,color:T.muted,marginBottom:8}}>💰 กำไรสุทธิจากรายรับเดือนนี้ (แบ่งเข้ากองกลางตามสัดส่วนที่ล็อกไว้ตอนรับเงิน)</div>
+            <div style={{display:'flex',gap:18,flexWrap:'wrap'}}>
+              <div><div style={{fontSize:11,color:T.muted}}>🏠 หมุนเวียน</div><div style={{fontSize:15,fontWeight:700,color:T.blue}}>{baht(monthWorkingCap)}</div></div>
+              <div><div style={{fontSize:11,color:T.muted}}>💸 ปันผล</div><div style={{fontSize:15,fontWeight:700,color:T.green}}>{baht(monthDividend)}</div></div>
+              <div><div style={{fontSize:11,color:T.muted}}>🎁 โบนัส</div><div style={{fontSize:15,fontWeight:700,color:T.gold}}>{baht(monthBonus)}</div></div>
+            </div>
+          </>
+        )}
       </Card>
       <div style={{display:'grid',gridTemplateColumns:mob?'1fr':'1fr 1fr',gap:14}}>
         <Card>
@@ -434,7 +582,7 @@ function Dashboard({state,user,setPage,setJobId}){
               {overBudgetJobs.slice(0,3).map(j=>(
                 <div key={j.id} style={{display:'flex',alignItems:'center',gap:8,padding:'7px 0',borderBottom:`1px solid ${T.bdr}`}}>
                   <span>🧾</span>
-                  <div style={{flex:1,fontSize:12}}><span style={{fontWeight:600}}>{j.clientName}</span><span style={{color:T.muted}}> ใช้จ่ายเกินงบ 60%</span></div>
+                  <div style={{flex:1,fontSize:12}}><span style={{fontWeight:600}}>{j.clientName}</span><span style={{color:T.muted}}> ใช้จ่ายเกินงบที่ตั้งไว้</span></div>
                   <Badge c={T.red}>เกินงบ</Badge>
                 </div>
               ))}
@@ -512,9 +660,9 @@ function Schedule({state,setPage,setJobId}){
           <h3 style={{fontSize:15,fontWeight:700,marginBottom:12,color:T.text}}>📋 รายการงานเดือน{MONTHS_TH[month]}</h3>
           {Object.entries(jobsByDate).sort((a,b)=>Number(a[0])-Number(b[0])).flatMap(([d,jobs])=>
             jobs.map(j=>{
-              const inc=(j.income?.deposit?.received?Number(j.income.deposit.amount)||0:0)+(j.income?.remaining?.received?Number(j.income.remaining.amount)||0:0);
+              const inc=jobReceivedTotal(j);
               const exp=(j.expenses||[]).reduce((s,e)=>s+Number(e.amount||0),0);
-              const remaining60=inc*0.6-exp;
+              const remaining60=jobPoolCuts(j).jobBudget-exp;
               return (
                 <Card key={j.id} onClick={()=>{setJobId(j.id);setPage('jobs');}}>
                   <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',flexWrap:'wrap',gap:8}}>
@@ -572,9 +720,9 @@ function Jobs({state,user,save,jobId,setJobId}){
       </div>
       {sorted.length===0?<Empty msg="ยังไม่มีงาน"/>:(
         <div>{sorted.map(j=>{
-          const inc=(j.income?.deposit?.received?Number(j.income.deposit.amount)||0:0)+(j.income?.remaining?.received?Number(j.income.remaining.amount)||0:0);
+          const inc=jobReceivedTotal(j);
           const exp=(j.expenses||[]).reduce((s,e)=>s+Number(e.amount||0),0);
-          const remaining60=inc*0.6-exp;
+          const remaining60=jobPoolCuts(j).jobBudget-exp;
           return (
             <Card key={j.id} onClick={()=>setJobId(j.id)} style={{padding:mob?'14px 16px':'18px 22px'}}>
               <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',gap:8}}>
@@ -617,7 +765,7 @@ function JobForm({state,user,save,onClose,job}){
       await save({jobs,hist});
     } else {
       const nj={id:uid(),createdAt:ts(),createdBy:user.id,status:'pending',statusAlerts:[],expenses:[],
-        income:{deposit:{amount:0,received:false,slipData:null},remaining:{amount:0,received:false,slipData:null}},
+        income:{deposit:{amount:0,received:false,slipData:null},remaining:{amount:0,received:false,slipData:null},extras:[]},
         ...f,agreedPrice:Number(f.agreedPrice)||0};
       const jobs=[...state.jobs,nj];
       const hist=[{id:uid(),type:'create',desc:`สร้างงาน: ${f.clientName}`,userId:user.id,jobId:nj.id,createdAt:ts()},...state.hist].slice(0,500);
@@ -650,14 +798,16 @@ function JobDetail({job,state,user,save,onBack}){
   const close=k=>setModals(p=>({...p,[k]:false}));
   const isAdmin=user.role==='admin';
   const mob=useMobile();
-  const totalInc=(job.income?.deposit?.received?Number(job.income.deposit.amount)||0:0)+(job.income?.remaining?.received?Number(job.income.remaining.amount)||0:0);
-  const budget60=totalInc*0.6;
+  const totalInc=jobReceivedTotal(job);
+  const jobExpected=jobExpectedTotal(job);
+  const cuts=jobPoolCuts(job);
+  const budget60=cuts.jobBudget;
   const totalExp=(job.expenses||[]).reduce((s,e)=>s+Number(e.amount||0),0);
   const remaining60=budget60-totalExp;
-  const netProfit40=totalInc*0.4;
-  const workingCapCut=totalInc*0.20;
-  const dividendCut=totalInc*0.15;
-  const bonusCut=totalInc*0.05;
+  const workingCapCut=cuts.workingCapital;
+  const dividendCut=cuts.dividend;
+  const bonusCut=cuts.bonus;
+  const netProfit40=workingCapCut+dividendCut+bonusCut;
   const canManageExpense=user.expenseManager===true;
   const expenseManagerUser=state.users.find(u=>u.expenseManager===true);
   const updateJob=async patch=>{const jobs=state.jobs.map(j=>j.id===job.id?{...j,...patch}:j);await save({jobs});};
@@ -700,7 +850,7 @@ function JobDetail({job,state,user,save,onBack}){
   };
   const uploadSlip=async(field,data)=>{ const income={...job.income,[field]:{...job.income[field],slipData:data}}; await updateJob({income}); };
   const uploadExpSlip=async(expId,data)=>{ const expenses=(job.expenses||[]).map(e=>e.id===expId?{...e,slipData:data}:e); await updateJob({expenses}); };
-  const TABS=[{id:'income',label:'รายรับ 💰'},{id:'expenses',label:'ค่าใช้จ่ายงาน (60%) 🧾'}];
+  const TABS=[{id:'income',label:'รายรับ 💰'},{id:'expenses',label:'ค่าใช้จ่ายงาน 🧾'}];
   return (
     <div>
       <div style={{marginBottom:20}}>
@@ -719,17 +869,18 @@ function JobDetail({job,state,user,save,onBack}){
       </div>
       <div style={{display:'grid',gridTemplateColumns:`repeat(auto-fill,minmax(${mob?'140px':'160px'},1fr))`,gap:12,marginBottom:14}}>
         <StatCard icon="💰" label="รับเงินแล้ว" value={baht(totalInc)} color={T.green}/>
-        <StatCard icon="🧾" label="งบ 60% (บีลาบริหาร)" value={baht(budget60)} color={T.amber}/>
+        <StatCard icon="📈" label="มูลค่ารวมของงาน" value={baht(jobExpected)} sub="รวมยังไม่ได้รับ" color={T.amber}/>
+        <StatCard icon="🧾" label="งบค่าใช้จ่ายงาน (บีลาบริหาร)" value={baht(budget60)} color={T.amber}/>
         <StatCard icon="📤" label="ใช้ไปแล้ว" value={baht(totalExp)} color={T.muted}/>
         <StatCard icon="📊" label="คงเหลือในงบ" value={baht(remaining60)} color={remaining60>=0?T.green:T.red}/>
       </div>
       {totalInc>0&&(
         <Card style={{background:T.s2,marginBottom:14}}>
-          <div style={{fontSize:13,color:T.muted,marginBottom:8}}>💰 กำไรสุทธิ 40% ที่แบ่งเข้ากองกลางบริษัทแล้ว</div>
+          <div style={{fontSize:13,color:T.muted,marginBottom:8}}>💰 กำไรสุทธิที่แบ่งเข้ากองกลางบริษัทแล้ว</div>
           <div style={{display:'flex',gap:18,flexWrap:'wrap'}}>
-            <div><div style={{fontSize:11,color:T.muted}}>🏠 หมุนเวียน 20%</div><div style={{fontSize:15,fontWeight:700,color:T.blue}}>{baht(workingCapCut)}</div></div>
-            <div><div style={{fontSize:11,color:T.muted}}>💸 ปันผล 15%</div><div style={{fontSize:15,fontWeight:700,color:T.green}}>{baht(dividendCut)}</div></div>
-            <div><div style={{fontSize:11,color:T.muted}}>🎁 โบนัส 5%</div><div style={{fontSize:15,fontWeight:700,color:T.gold}}>{baht(bonusCut)}</div></div>
+            <div><div style={{fontSize:11,color:T.muted}}>🏠 หมุนเวียน</div><div style={{fontSize:15,fontWeight:700,color:T.blue}}>{baht(workingCapCut)}</div></div>
+            <div><div style={{fontSize:11,color:T.muted}}>💸 ปันผล</div><div style={{fontSize:15,fontWeight:700,color:T.green}}>{baht(dividendCut)}</div></div>
+            <div><div style={{fontSize:11,color:T.muted}}>🎁 โบนัส</div><div style={{fontSize:15,fontWeight:700,color:T.gold}}>{baht(bonusCut)}</div></div>
           </div>
         </Card>
       )}
@@ -747,7 +898,7 @@ function JobDetail({job,state,user,save,onBack}){
             <h3 style={{fontSize:15,fontWeight:700,color:T.text}}>รายรับ</h3>
             {isAdmin&&<Btn sm onClick={()=>open('editInc')}>✏️ แก้ไขรายรับ</Btn>}
           </div>
-          <p style={{fontSize:12,color:T.muted,marginBottom:12}}>เมื่อกดรับเงินแล้ว ระบบจะแบ่งเงิน 60% เข้างบค่าใช้จ่ายงาน และ 40% เข้ากองทุนบริษัทอัตโนมัติ</p>
+          <p style={{fontSize:12,color:T.muted,marginBottom:12}}>เมื่อกดรับเงินแล้ว ระบบจะแบ่งเงินตามสัดส่วนที่ตั้งไว้ ณ ตอนนั้น ({(state.settings?.splitRatios||DEFAULT_RATIO).jobBudget}% เข้างบค่าใช้จ่ายงาน ส่วนที่เหลือเข้ากองทุนบริษัทอัตโนมัติ) และล็อกสัดส่วนนั้นไว้ถาวร</p>
           {['deposit','remaining'].map(field=>{
             const inc=job.income?.[field]||{};
             const label=field==='deposit'?'เงินมัดจำ':'ยอดที่เหลือ';
@@ -765,12 +916,29 @@ function JobDetail({job,state,user,save,onBack}){
               </Card>
             );
           })}
+          {(job.income?.extras||[]).length>0&&(
+            <div style={{marginTop:6,marginBottom:2}}>
+              <div style={{fontSize:12,color:T.muted,marginBottom:8}}>รายการเสริม (เช่น ค่าน้ำมัน, ช่อดอกไม้, แพ็คเกจเสริม)</div>
+            </div>
+          )}
+          {(job.income?.extras||[]).map(x=>(
+            <Card key={x.id}>
+              <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',flexWrap:'wrap',gap:10}}>
+                <div>
+                  <div style={{fontSize:13,color:T.muted,marginBottom:4}}>{x.label||'รายการเสริม'}</div>
+                  <div style={{fontSize:20,fontWeight:700,color:x.received?T.green:T.text}}>{baht(x.amount)}</div>
+                  {x.date&&<div style={{fontSize:12,color:T.muted,marginTop:2}}>รับเมื่อ {dtTH(x.date)}</div>}
+                </div>
+                <Badge c={x.received?T.green:T.amber}>{x.received?'รับแล้ว ✓':'ยังไม่ได้รับ'}</Badge>
+              </div>
+            </Card>
+          ))}
         </div>
       )}
       {tab==='expenses'&&(
         <div>
           <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:6,flexWrap:'wrap',gap:8}}>
-            <h3 style={{fontSize:15,fontWeight:700}}>ค่าใช้จ่ายงาน (จากงบ 60%)</h3>
+            <h3 style={{fontSize:15,fontWeight:700}}>ค่าใช้จ่ายงาน (จากงบที่ตั้งไว้)</h3>
             {canManageExpense&&<Btn sm onClick={()=>open('addExp')}>+ เพิ่มรายจ่าย</Btn>}
           </div>
           <p style={{fontSize:12,color:T.muted,marginBottom:14}}>💼 บริหารโดย {expenseManagerUser?.name||'บีลา'} เท่านั้น{!canManageExpense&&' · ดูได้อย่างเดียว'}</p>
@@ -810,10 +978,30 @@ function IncomeForm({job,state,user,save,onClose}){
     deposit:{amount:job.income?.deposit?.amount||0,date:job.income?.deposit?.date||'',received:job.income?.deposit?.received||false,slipData:job.income?.deposit?.slipData||null},
     remaining:{amount:job.income?.remaining?.amount||0,date:job.income?.remaining?.date||'',received:job.income?.remaining?.received||false,slipData:job.income?.remaining?.slipData||null},
   });
+  const [extras,setExtras]=useState((job.income?.extras||[]).map(x=>({...x})));
   const set=(field,k)=>e=>setInc(p=>({...p,[field]:{...p[field],[k]:e.target.value}}));
   const toggle=field=>setInc(p=>({...p,[field]:{...p[field],received:!p[field].received}}));
+  const addExtra=()=>setExtras(p=>[...p,{id:uid(),label:'',amount:0,date:'',received:false}]);
+  const setExtra=(id,k)=>e=>setExtras(p=>p.map(x=>x.id===id?{...x,[k]:e.target.value}:x));
+  const toggleExtra=id=>setExtras(p=>p.map(x=>x.id===id?{...x,received:!x.received}:x));
+  const removeExtra=id=>{ if(!window.confirm('ลบรายการเสริมนี้?')) return; setExtras(p=>p.filter(x=>x.id!==id)); };
   const submit=async()=>{
-    const jobs=state.jobs.map(j=>j.id===job.id?{...j,income:inc}:j);
+    const currentRatio=state.settings?.splitRatios||DEFAULT_RATIO;
+    const stamp=(orig,updated)=>{
+      if(!updated.received) return {...updated,ratio:null};
+      if(orig?.received&&orig?.ratio) return {...updated,ratio:orig.ratio};
+      return {...updated,ratio:currentRatio};
+    };
+    const finalExtras=extras.map(x=>{
+      const orig=(job.income?.extras||[]).find(o=>o.id===x.id);
+      return stamp(orig,x);
+    });
+    const income={
+      deposit:stamp(job.income?.deposit,inc.deposit),
+      remaining:stamp(job.income?.remaining,inc.remaining),
+      extras:finalExtras,
+    };
+    const jobs=state.jobs.map(j=>j.id===job.id?{...j,income}:j);
     const hist=[{id:uid(),type:'income',desc:`อัปเดตรายรับ: ${job.clientName}`,userId:user.id,jobId:job.id,createdAt:ts()},...state.hist].slice(0,500);
     await save({jobs,hist}); onClose();
   };
@@ -836,6 +1024,31 @@ function IncomeForm({job,state,user,save,onClose}){
             </div>
           );
         })}
+        <div>
+          <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10}}>
+            <div style={{fontWeight:600,fontSize:14,color:T.gold}}>รายการเสริม</div>
+            <Btn sm ghost onClick={addExtra}>+ เพิ่มรายการ</Btn>
+          </div>
+          <p style={{fontSize:11,color:T.muted,marginBottom:10}}>เช่น ค่าน้ำมันรถ, ช่อดอกไม้เจ้าสาว, แพ็คเกจเสริม</p>
+          <div style={{display:'flex',flexDirection:'column',gap:10}}>
+            {extras.map(x=>(
+              <div key={x.id} style={{background:T.s2,borderRadius:10,padding:14}}>
+                <div style={{display:'flex',justifyContent:'flex-end',marginBottom:6}}>
+                  <button onClick={()=>removeExtra(x.id)} style={{background:'none',border:'none',color:T.red,cursor:'pointer',fontSize:12,fontFamily:T.ff}}>🗑 ลบ</button>
+                </div>
+                <div style={{display:'flex',flexDirection:'column',gap:10}}>
+                  <Inp label="ชื่อรายการ" value={x.label} onChange={setExtra(x.id,'label')} placeholder="เช่น ช่อดอกไม้เจ้าสาว"/>
+                  <Inp label="จำนวนเงิน (บาท)" type="number" value={x.amount} onChange={setExtra(x.id,'amount')} min="0" step="100"/>
+                  <Inp label="วันที่รับ" type="date" value={x.date} onChange={setExtra(x.id,'date')}/>
+                  <label style={{display:'flex',alignItems:'center',gap:8,cursor:'pointer',fontSize:14}}>
+                    <input type="checkbox" checked={x.received} onChange={()=>toggleExtra(x.id)} style={{width:16,height:16,accentColor:T.gold}}/>
+                    <span>รับเงินแล้ว</span>
+                  </label>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
         <div style={{display:'flex',gap:10,justifyContent:'flex-end'}}>
           <Btn ghost onClick={onClose}>ยกเลิก</Btn><Btn onClick={submit}>บันทึก</Btn>
         </div>
@@ -857,7 +1070,7 @@ function ExpenseForm({job,state,user,save,onClose}){
     await save({jobs,hist}); onClose();
   };
   return (
-    <Modal title="เพิ่มรายจ่าย (งบ 60%)" onClose={onClose}>
+    <Modal title="เพิ่มรายจ่าย (งบค่าใช้จ่ายงาน)" onClose={onClose}>
       <div style={{display:'flex',flexDirection:'column',gap:14}}>
         <Inp label="ประเภท" type="select" value={f.category} onChange={set('category')} options={[{v:'material',l:'🛒 ค่าวัสดุ/ดอกไม้'},{v:'labor',l:'💪 ค่าจ้างแรงงาน'}]}/>
         <Inp label="รายการ *" value={f.description} onChange={set('description')} placeholder="เช่น ดอกไม้, ผ้า, ค่าจ้างตกแต่ง"/>
@@ -882,7 +1095,7 @@ function Funds({state,user,save}){
     <div>
       <div style={{marginBottom:16}}>
         <h1 style={{fontSize:22,fontWeight:700,color:T.gold}}>กองทุนบริษัท</h1>
-        <p style={{color:T.muted,fontSize:13}}>แบ่งจากรายรับ 40% ของทุกงาน · ทุกคนแก้ไขได้</p>
+        <p style={{color:T.muted,fontSize:13}}>แบ่งจากกำไรสุทธิของทุกงานตามสัดส่วนที่ตั้งไว้ · ทุกคนแก้ไขได้</p>
       </div>
       <div style={{display:'flex',gap:4,marginBottom:18,borderBottom:`1px solid ${T.bdr}`,overflowX:'auto'}}>
         {TABS.map(t=>(
@@ -903,13 +1116,12 @@ function FundsOverview({state,pools,mob}){
   return (
     <div>
       <div style={{display:'grid',gridTemplateColumns:`repeat(auto-fill,minmax(${mob?'145px':'180px'},1fr))`,gap:14,marginBottom:20}}>
-        <StatCard icon="💰" label="รับเงินรวมทุกงาน" value={baht(pools.totalReceived)} color={T.text}/>
-        <StatCard icon="🏠" label="เงินหมุนเวียนคงเหลือ" value={baht(pools.workingCapitalBalance)} sub={`จาก ${baht(pools.workingCapitalPoolTotal)} (20%)`} color={T.blue}/>
-        <StatCard icon="💸" label="เงินปันผลคงเหลือ" value={baht(pools.dividendPoolBalance)} sub={`จาก ${baht(pools.dividendPoolTotal)} (15%)`} color={T.green}/>
-        <StatCard icon="🎁" label="เงินโบนัสคงเหลือ" value={baht(pools.bonusPoolBalance)} sub={`จาก ${baht(pools.bonusPoolTotal)} (5%)`} color={T.gold}/>
+        <StatCard icon="🏠" label="เงินหมุนเวียนคงเหลือ" value={baht(pools.workingCapitalBalance)} sub={`จาก ${baht(pools.workingCapitalPoolTotal)}`} color={T.blue}/>
+        <StatCard icon="💸" label="เงินปันผลคงเหลือ" value={baht(pools.dividendPoolBalance)} sub={`จาก ${baht(pools.dividendPoolTotal)}`} color={T.green}/>
+        <StatCard icon="🎁" label="เงินโบนัสคงเหลือ" value={baht(pools.bonusPoolBalance)} sub={`จาก ${baht(pools.bonusPoolTotal)}`} color={T.gold}/>
       </div>
       <Card>
-        <h3 style={{fontSize:15,fontWeight:700,marginBottom:12}}>🧾 งบค่าใช้จ่ายแต่ละงาน (60%, บีลาบริหาร)</h3>
+        <h3 style={{fontSize:15,fontWeight:700,marginBottom:12}}>🧾 งบค่าใช้จ่ายแต่ละงาน (บีลาบริหาร)</h3>
         {state.jobs.length===0?<Empty msg="ยังไม่มีงาน"/>:state.jobs.map(j=>{
           const b=pools.jobBudgets[j.id];
           if(!b||b.received===0) return null;
@@ -1197,16 +1409,35 @@ function TransferForm({state,user,save,balances,onClose}){
   const [f,setF]=useState({from:'external',to:'dividend',amount:'',note:'',date:new Date().toISOString().split('T')[0]});
   const set=k=>e=>setF(p=>({...p,[k]:e.target.value}));
   const amtNum=Number(f.amount)||0;
-  const overBalance=f.from!=='external'&&amtNum>balances[f.from];
+  const overBalance=f.from!=='external'&&f.from!=='all40'&&amtNum>balances[f.from];
+  const ratio={...DEFAULT_RATIO,...(state.settings?.splitRatios||{})};
+  const profitTotal=(Number(ratio.workingCapital)||0)+(Number(ratio.dividend)||0)+(Number(ratio.bonus)||0)||1;
+  const SPLIT40=[
+    {k:'workingCapital',ratio:(Number(ratio.workingCapital)||0)/profitTotal},
+    {k:'dividend',ratio:(Number(ratio.dividend)||0)/profitTotal},
+    {k:'bonus',ratio:(Number(ratio.bonus)||0)/profitTotal},
+  ]; // สัดส่วนภายในกองกำไร คำนวณจากค่าปัจจุบันในหน้าตั้งค่า
   const submit=async()=>{
     if(f.from===f.to){alert('กองต้นทางและปลายทางต้องไม่ใช่กองเดียวกัน');return;}
     if(!amtNum||amtNum<=0){alert('กรอกจำนวนเงิน');return;}
+    if(f.to==='all40'){
+      const newTransfers=[],newHist=[];
+      SPLIT40.forEach(s=>{
+        const amt=Math.round(amtNum*s.ratio*100)/100;
+        if(amt<=0)return;
+        newTransfers.push({id:uid(),from:f.from,to:s.k,amount:amt,note:f.note?`${f.note} (แบ่งจากกองทุนกำไรอัตโนมัติ)`:'แบ่งจากกองทุนกำไรอัตโนมัติ',date:f.date,createdBy:user.id,createdAt:ts()});
+        newHist.push({id:uid(),type:'transfer',desc:`โอนเงิน ${baht(amt)} จาก${POOL_LABEL[f.from].l} → ${POOL_LABEL[s.k].l} (แบ่งจากกองทุนกำไรอัตโนมัติ)`,userId:user.id,amount:amt,createdAt:ts()});
+      });
+      const hist=[...newHist,...state.hist].slice(0,500);
+      await save({transfers:[...newTransfers,...(state.transfers||[])],hist}); onClose();
+      return;
+    }
     const nt={id:uid(),from:f.from,to:f.to,amount:amtNum,note:f.note,date:f.date,createdBy:user.id,createdAt:ts()};
     const hist=[{id:uid(),type:'transfer',desc:`โอนเงิน ${baht(amtNum)} จาก${POOL_LABEL[f.from].l} → ${POOL_LABEL[f.to].l}`,userId:user.id,amount:amtNum,createdAt:ts()},...state.hist].slice(0,500);
     await save({transfers:[nt,...(state.transfers||[])],hist}); onClose();
   };
   const fromOptions=[{v:'external',l:`🗂️ เงินสดเก่า/นอกระบบ (ยอดยกมา)`},...REAL_POOLS.map(k=>({v:k,l:`${POOL_LABEL[k].i} ${POOL_LABEL[k].l} (คงเหลือ ${baht(balances[k])})`}))];
-  const toOptions=[...REAL_POOLS.map(k=>({v:k,l:`${POOL_LABEL[k].i} ${POOL_LABEL[k].l} (คงเหลือ ${baht(balances[k])})`})),{v:'external',l:`🗂️ เงินสดเก่า/นอกระบบ (ตัดออก)`}];
+  const toOptions=[{v:'all40',l:`📦 กองทุนกำไร (แบ่งอัตโนมัติ ${ratio.workingCapital}/${ratio.dividend}/${ratio.bonus}%)`},...REAL_POOLS.map(k=>({v:k,l:`${POOL_LABEL[k].i} ${POOL_LABEL[k].l} (คงเหลือ ${baht(balances[k])})`})),{v:'external',l:`🗂️ เงินสดเก่า/นอกระบบ (ตัดออก)`}];
   return (
     <Modal title="โอนย้ายเงิน / ปรับยอดกองทุน" onClose={onClose}>
       <div style={{display:'flex',flexDirection:'column',gap:14}}>
@@ -1358,19 +1589,26 @@ function Settings({state,user,save,setUser}){
     alert('บันทึกข้อมูลผู้ถือหุ้นสำเร็จ');
   };
 
+  const setRatio=(k)=>e=>setSett(p=>({...p,splitRatios:{...(p.splitRatios||DEFAULT_RATIO),[k]:e.target.value}}));
+  const ratio={...DEFAULT_RATIO,...(sett.splitRatios||{})};
+  const ratioSum=Number(ratio.jobBudget||0)+Number(ratio.workingCapital||0)+Number(ratio.dividend||0)+Number(ratio.bonus||0);
+
   const saveApp=async()=>{
     if(!sett.appName.trim()){alert('กรุณากรอกชื่อแอป');return;}
+    if(Math.abs(ratioSum-100)>0.01){alert(`สัดส่วนแบ่งรายรับรวมต้องได้ 100% (ปัจจุบัน: ${ratioSum}%)`);return;}
     await save({settings:sett});
     document.title=sett.appName;
     alert('บันทึกตั้งค่าแอปสำเร็จ');
   };
 
   const exportAll=()=>{
-    const rows=[['ชื่อลูกค้า','วันงาน','ราคาตกลง','รายรับ','รายจ่าย','กำไร','สถานะ']];
+    const rows=[['ชื่อลูกค้า','วันงาน','ราคาตกลง','รายการเสริม','รายได้รวมทั้งหมด','รับเงินแล้ว','รายจ่าย','กำไร','สถานะ']];
     state.jobs.forEach(j=>{
-      const inc=(j.income?.deposit?.received?Number(j.income.deposit.amount)||0:0)+(j.income?.remaining?.received?Number(j.income.remaining.amount)||0:0);
+      const inc=jobReceivedTotal(j);
+      const extrasTotal=jobExtrasTotal(j,false);
+      const expected=jobExpectedTotal(j);
       const exp=(j.expenses||[]).reduce((s,e)=>s+Number(e.amount||0),0);
-      rows.push([j.clientName,dtTH(j.eventDate),j.agreedPrice,inc,exp,inc-exp,STATUS[j.status]?.label]);
+      rows.push([j.clientName,dtTH(j.eventDate),j.agreedPrice,extrasTotal,expected,inc,exp,inc-exp,STATUS[j.status]?.label]);
     });
     exportCSV(rows,'jobs-report.csv');
   };
@@ -1383,21 +1621,47 @@ function Settings({state,user,save,setUser}){
       {isAdmin&&(
         <Card>
           <h3 style={{fontSize:15,fontWeight:700,marginBottom:16}}>🎨 ตั้งค่าแอป</h3>
-          <div style={{display:'grid',gridTemplateColumns:mob?'1fr':'1fr 1fr',gap:12,marginBottom:12}}>
+          <div style={{marginBottom:12}}>
             <Inp label="ชื่อแอป / ธุรกิจ" value={sett.appName} onChange={e=>setSett(p=>({...p,appName:e.target.value}))} placeholder="Backdrop Studio"/>
-            <Inp label="ไอคอน (Emoji)" value={sett.appIcon} onChange={e=>setSett(p=>({...p,appIcon:e.target.value}))} placeholder="💐"/>
+          </div>
+          <div style={{marginBottom:12,display:'flex',flexDirection:'column',gap:6}}>
+            <label style={{fontSize:12,color:T.muted,letterSpacing:'.04em'}}>ไอคอนแอป</label>
+            <IconPickerField value={sett.appIcon} onChange={v=>setSett(p=>({...p,appIcon:v}))}/>
+            {!isImgIcon(sett.appIcon)&&(
+              <div style={{maxWidth:200,marginTop:4}}>
+                <Inp label="หรือพิมพ์ Emoji" value={sett.appIcon} onChange={e=>setSett(p=>({...p,appIcon:e.target.value}))} placeholder="💐"/>
+              </div>
+            )}
           </div>
           <div style={{marginBottom:14}}>
             <Inp label="คำบรรยายใต้ชื่อ" value={sett.subtitle} onChange={e=>setSett(p=>({...p,subtitle:e.target.value}))} placeholder="ระบบบัญชีธุรกิจ"/>
           </div>
           <div style={{background:T.s2,borderRadius:10,padding:'12px 16px',marginBottom:14,display:'flex',alignItems:'center',gap:12}}>
-            <span style={{fontSize:32}}>{sett.appIcon||'💐'}</span>
+            <AppIcon icon={sett.appIcon} size={32}/>
             <div>
               <div style={{fontWeight:700,fontSize:15,color:T.gold}}>{sett.appName||'ชื่อแอป'}</div>
               <div style={{fontSize:12,color:T.muted}}>{sett.subtitle||'คำบรรยาย'}</div>
             </div>
           </div>
           <div style={{display:'flex',justifyContent:'flex-end'}}><Btn onClick={saveApp}>💾 บันทึกตั้งค่าแอป</Btn></div>
+        </Card>
+      )}
+
+      {/* Split Ratio Settings */}
+      {isAdmin&&(
+        <Card>
+          <h3 style={{fontSize:15,fontWeight:700,marginBottom:6}}>📊 สัดส่วนแบ่งรายรับ</h3>
+          <p style={{fontSize:12,color:T.muted,marginBottom:16}}>สัดส่วนนี้จะถูก "ล็อก" ไว้ทุกครั้งที่ติ๊กรับเงินแล้ว การเปลี่ยนตรงนี้จะมีผลกับเงินที่รับใหม่เท่านั้น ไม่กระทบเงินที่เคยรับไปแล้ว</p>
+          <div style={{display:'grid',gridTemplateColumns:mob?'1fr 1fr':'repeat(4,1fr)',gap:12,marginBottom:10}}>
+            <Inp label="🧾 งบค่าใช้จ่ายงาน %" type="number" value={ratio.jobBudget} onChange={setRatio('jobBudget')} min="0" max="100" step="1"/>
+            <Inp label="🏠 เงินหมุนเวียน %" type="number" value={ratio.workingCapital} onChange={setRatio('workingCapital')} min="0" max="100" step="1"/>
+            <Inp label="💸 เงินปันผล %" type="number" value={ratio.dividend} onChange={setRatio('dividend')} min="0" max="100" step="1"/>
+            <Inp label="🎁 เงินโบนัส %" type="number" value={ratio.bonus} onChange={setRatio('bonus')} min="0" max="100" step="1"/>
+          </div>
+          <div style={{fontSize:13,fontWeight:600,color:Math.abs(ratioSum-100)>0.01?T.red:T.green,marginBottom:14}}>
+            รวม {ratioSum}% {Math.abs(ratioSum-100)>0.01?'(ต้องรวมให้ได้ 100%)':'✓'}
+          </div>
+          <div style={{display:'flex',justifyContent:'flex-end'}}><Btn onClick={saveApp}>💾 บันทึกสัดส่วน</Btn></div>
         </Card>
       )}
 
@@ -1426,7 +1690,7 @@ function Settings({state,user,save,setUser}){
                 <div style={{display:'flex',gap:6,flexWrap:'wrap'}}>
                   <button onClick={()=>setRole(u.id,'admin')} style={{background:u.role==='admin'?T.gold+'33':'transparent',border:`1px solid ${u.role==='admin'?T.gold:T.bdr}`,borderRadius:6,padding:'4px 10px',color:u.role==='admin'?T.gold:T.muted,cursor:'pointer',fontSize:11,fontFamily:T.ff}}>Admin</button>
                   <button onClick={()=>setRole(u.id,'member')} style={{background:u.role==='member'?T.blue+'33':'transparent',border:`1px solid ${u.role==='member'?T.blue:T.bdr}`,borderRadius:6,padding:'4px 10px',color:u.role==='member'?T.blue:T.muted,cursor:'pointer',fontSize:11,fontFamily:T.ff}}>Member</button>
-                  <button onClick={()=>setExpenseManager(u.id)} title="ผู้บริหารงบ 60%" style={{background:u.expenseManager?T.amber+'33':'transparent',border:`1px solid ${u.expenseManager?T.amber:T.bdr}`,borderRadius:6,padding:'4px 10px',color:u.expenseManager?T.amber:T.muted,cursor:'pointer',fontSize:11,fontFamily:T.ff}}>💼 ผู้คุมงบ 60%</button>
+                  <button onClick={()=>setExpenseManager(u.id)} title="ผู้บริหารงบค่าใช้จ่ายงาน" style={{background:u.expenseManager?T.amber+'33':'transparent',border:`1px solid ${u.expenseManager?T.amber:T.bdr}`,borderRadius:6,padding:'4px 10px',color:u.expenseManager?T.amber:T.muted,cursor:'pointer',fontSize:11,fontFamily:T.ff}}>💼 ผู้คุมงบ</button>
                   {u.id!==user.id&&<button onClick={()=>removeUser(u.id)} style={{background:'transparent',border:`1px solid ${T.red}44`,borderRadius:6,padding:'4px 8px',color:T.red,cursor:'pointer',fontSize:11,fontFamily:T.ff}}>ลบ</button>}
                 </div>
               )}
